@@ -36,7 +36,12 @@ for i in range(10000):
     obs_dict = env.step()
     frame = env.drones[0].rgbaImg
     frame = cv2.cvtColor(frame.astype(np.uint8), cv2.COLOR_RGBA2BGR)
+    sensors = env.state(0)
+    gyro_data = sensors[0]
+    accel_data = sensors[2]
+
     cv2.waitKey(1)
     cv2.imshow("Camera View", frame)
+
 
 env.close()
