@@ -7,5 +7,6 @@ requires-python = ">=3.13"
 dependencies = [
     "gymnasium>=1.1.1",
     "numpy>=2.2.6",
+    "opencv-python>=4.11.0.86",
     "pyflyt>=0.21.0",
 ]

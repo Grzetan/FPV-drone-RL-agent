@@ -1,5 +1,6 @@
 import numpy as np
 from PyFlyt.core import Aviary
+import cv2
 
 # Define starting positions and orientations
 start_pos = np.array([[0.0, 0.0, 0.0]])
@@ -33,5 +34,9 @@ env.set_setpoint(0, setpoint)
 # Step the physics
 for i in range(10000):
     obs_dict = env.step()
+    frame = env.drones[0].rgbaImg
+    frame = cv2.cvtColor(frame.astype(np.uint8), cv2.COLOR_RGBA2BGR)
+    cv2.waitKey(1)
+    cv2.imshow("Camera View", frame)
 
 env.close()
