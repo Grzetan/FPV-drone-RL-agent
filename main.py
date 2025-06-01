@@ -25,12 +25,11 @@ sphere_id = env.createMultiBody(
 )
 
 # Define control mode
-env.set_mode(7)
+env.set_mode(0)
 
 # Define a setpoint
-setpoint = np.array([1.0, 0.0, 0.0, 1.0])
+setpoint = np.array([0.0, 0.0, -1.57, 0.5])
 env.set_setpoint(0, setpoint)
-
 # Step the physics
 for i in range(10000):
     obs_dict = env.step()
