@@ -37,6 +37,3 @@ for i in range(10000):
 
     cv2.waitKey(1)
     cv2.imshow("Camera View", frame)
-
-
-env.close()
