@@ -10,4 +10,5 @@ dependencies = [
     "opencv-python>=4.11.0.86",
     "pyflyt>=0.21.0",
     "stable-baselines3>=2.6.0",
+    "tensorboard>=2.19.0",
 ]
