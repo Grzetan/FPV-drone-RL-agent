@@ -1,17 +1,15 @@
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
-import cv2
 from PyFlyt.core import Aviary
 from stable_baselines3.common.env_checker import check_env
 from stable_baselines3 import PPO
-from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
-from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.vec_env import DummyVecEnv
 import os
 
 
 class DroneEnv(gym.Env):
-    def __init__(self):
+    def __init__(self, render=False):
         super(DroneEnv, self).__init__()
 
         self.target_pos = np.array([0, 0, 3], dtype=np.float32)
@@ -36,7 +34,7 @@ class DroneEnv(gym.Env):
         self.env = Aviary(
             start_pos=start_pos,
             start_orn=start_orn,
-            render=True,
+            render=render,
             drone_type="quadx",
             drone_options={"use_camera": False},
         )
@@ -45,6 +43,8 @@ class DroneEnv(gym.Env):
 
         self.action = np.zeros(4, dtype=np.float32)
 
+        self.termination = False
+        self.truncation = False
         self.max_steps = 300
         self.step_count = 0
         self.flight_dome_size = 20.0
@@ -53,7 +53,7 @@ class DroneEnv(gym.Env):
     def create_observation(self, sensors):
         gyro_data = sensors[0]
         attitude_data = sensors[1]
-        target_distance = np.linalg.norm(sensors[3] - self.target_pos)
+        target_distance = [np.linalg.norm(sensors[3] - self.target_pos)]
 
         return np.concatenate(
             (gyro_data, attitude_data, target_distance, self.action),
@@ -73,7 +73,9 @@ class DroneEnv(gym.Env):
         self.action = action.copy()
 
         self.env.set_setpoint(0, action)
-        self.env.step()
+
+        for _ in range(5):
+            self.env.step()
 
         sensors = self.env.state(0)
 
@@ -122,30 +124,39 @@ class DroneEnv(gym.Env):
 
 
 if __name__ == "__main__":
-    # Initialize environment with rendering disabled for faster training
+    models_dir = "models"
+    logs_dir = "logs"
+    os.makedirs(models_dir, exist_ok=True)
+    os.makedirs(logs_dir, exist_ok=True)
+
     env = DroneEnv()
-    check_env(env)
-    print("Environment is valid!")
+    env = DummyVecEnv([lambda: env])
 
-    # Set up logging
-
-    # Create log directory
-    log_dir = "logs"
-    os.makedirs(log_dir, exist_ok=True)
-
-    # Wrap environment with monitor for logging
-    env = Monitor(env, log_dir)
-
-    # Create checkpoint callback
-    checkpoint_callback = CheckpointCallback(
-        save_freq=1000,  # Save model every 1000 steps
-        save_path=f"{log_dir}/checkpoints/",
-        name_prefix="drone_model",
+    # Create PPO model
+    model = PPO(
+        "MlpPolicy",
+        env,
         verbose=1,
+        tensorboard_log=logs_dir,
+        learning_rate=3e-4,
+        n_steps=2048,
+        batch_size=64,
+        n_epochs=10,
+        gamma=0.99,
     )
 
-    # Initialize and train model with logging
-    model = PPO("MlpPolicy", env, verbose=1, tensorboard_log=log_dir, device="cpu")
-    model.learn(total_timesteps=25_000, callback=checkpoint_callback)
-    model.save(f"{log_dir}/final_drone_model")
-    print("Model trained and saved!")
+    # Train the model
+    total_timesteps = 20000
+    model.learn(total_timesteps=total_timesteps)
+
+    # Save the model
+    model.save(f"{models_dir}/ppo_quadx_hover")
+
+    # # Test the trained model
+    env = DroneEnv()
+    obs, _ = env.reset()
+    term, trunc = False, False
+
+    while not (term or trunc):
+        action, _ = model.predict(obs, deterministic=True)
+        obs, reward, term, trunc, _ = env.step(action)
