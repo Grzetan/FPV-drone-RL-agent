@@ -3,14 +3,13 @@ import PyFlyt.gym_envs
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv
 import os
-from hover import DroneEnv
 
 models_dir = "models"
 logs_dir = "logs"
 os.makedirs(models_dir, exist_ok=True)
 os.makedirs(logs_dir, exist_ok=True)
 
-env = DroneEnv()
+env = gymnasium.make("PyFlyt/QuadX-Hover-v1")
 env = DummyVecEnv([lambda: env])
 
 # Create PPO model
