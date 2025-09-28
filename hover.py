@@ -18,15 +18,11 @@ class DroneEnv(gym.Env):
         # [<-1, 1>: roll, <-1, 1>: pitch, <-1, 1>: yaw, <-1, 1>: throttle]
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(4,), dtype=np.float32)
 
-        # Observation space: [gyro_xyz, attitude_xyz, target_distance, previous_action_yrpt, sphere_center_xy]
-        low_bounds = np.array(
-            [-np.inf] * 3 + [-1] * 3 + [-np.inf] + [-1] * 4 + [-1] * 2, dtype=np.float32
-        )
-        high_bounds = np.array(
-            [np.inf] * 3 + [1] * 3 + [np.inf] + [1] * 4 + [1] * 2, dtype=np.float32
-        )
+        # Observation space: [attitude_xyz, sphere_center_xy]
+        low_bounds = np.array([-1] * 3 + [-1] * 2, dtype=np.float32)
+        high_bounds = np.array([1] * 3 + [1] * 2, dtype=np.float32)
         self.observation_space = spaces.Box(
-            low=low_bounds, high=high_bounds, shape=(13,), dtype=np.float32
+            low=low_bounds, high=high_bounds, shape=(5,), dtype=np.float32
         )
 
         start_pos = np.array([[0.0, 0.0, 0.0]])
@@ -93,16 +89,14 @@ class DroneEnv(gym.Env):
         return np.array([-1, -1], dtype=np.float32)  # ? What should be here?
 
     def create_observation(self, sensors):
-        gyro_data = sensors[0]
         attitude_data = sensors[1]
-        target_distance = [np.linalg.norm(sensors[3] - self.target_pos)]
 
         # Get camera image and detect red sphere center
         rgba_image = self.env.drones[0].rgbaImg
         sphere_center = self.detect_red_sphere_center(rgba_image)
 
         return np.concatenate(
-            (gyro_data, attitude_data, target_distance, self.action, sphere_center),
+            (attitude_data, sphere_center),
             dtype=np.float32,
         )
 
@@ -164,27 +158,53 @@ class DroneEnv(gym.Env):
         return obs, self.reward, self.termination, self.truncation, self.info
 
     def test_env(self):
-        print("Controls: UP arrow = throttle 0.5, any other key = throttle 0.0")
-        print("Press 'q' to quit, 'ESC' to exit")
+        print("Controls:")
+        print("  UP arrow = throttle 1.0")
+        print("  LEFT arrow = roll left (-0.5)")
+        print("  RIGHT arrow = roll right (+0.5)")
+        print("  Press 'q' to quit, 'ESC' to exit")
+
+        # Initialize persistent key states with timing
+        import time
+
+        key_states = {"up": False, "left": False, "right": False}
+        key_timers = {"up": 0, "left": 0, "right": 0}
+        key_timeout = 0.1  # Reset key state after 100ms of no input
 
         for i in range(10000):
-            # Keyboard control for throttle
+            current_time = time.time()
+
+            # Keyboard control with very short wait time
             key = cv2.waitKey(1) & 0xFF
 
-            # Set throttle based on key input
-            if (
-                key == 82 or key == 0
-            ):  # UP arrow key (different codes on different systems)
-                throttle = 1
-            else:
-                throttle = 0.0
-
-            # Exit conditions
-            if key == ord("q") or key == 27:  # 'q' or ESC key
+            # Update key states and timers when keys are pressed
+            if key == 82:  # UP arrow key
+                key_states["up"] = True
+                key_timers["up"] = current_time
+            elif key == 81:  # LEFT arrow key
+                key_states["left"] = True
+                key_timers["left"] = current_time
+            elif key == 83:  # RIGHT arrow key
+                key_states["right"] = True
+                key_timers["right"] = current_time
+            elif key == ord("q") or key == 27:  # 'q' or ESC key
                 break
 
-            # Set action with controlled throttle [roll, pitch, yaw, throttle]
-            action = np.array([0.0, 0.0, 0.0, throttle])
+            # Reset key states if timeout exceeded
+            for key_name in key_states:
+                if current_time - key_timers[key_name] > key_timeout:
+                    key_states[key_name] = False
+
+            # Set controls based on current key states
+            throttle = 1.0 if key_states["up"] else 0.0
+            roll = 0.0
+            if key_states["left"]:
+                roll = -10.0
+            elif key_states["right"]:
+                roll = 10.0
+
+            # Set action [roll, pitch, yaw, throttle]
+            action = np.array([roll, 0.0, 0.0, throttle])
             self.env.set_setpoint(0, action)
 
             self.env.step()
@@ -196,19 +216,12 @@ class DroneEnv(gym.Env):
 
             # Print observation space with labels (less frequently to reduce spam)
             if i % 10 == 0:  # Print every 10 iterations instead of every iteration
-                print(f"Iteration {i} - Throttle: {throttle}")
+                print(f"Iteration {i} - Roll: {roll:.1f}, Throttle: {throttle:.1f}")
                 print(
-                    f"  Gyro [x,y,z]: [{observation[0]:.3f}, {observation[1]:.3f}, {observation[2]:.3f}]"
+                    f"  Attitude [x,y,z]: [{np.degrees(observation[0]):.3f}°, {np.degrees(observation[1]):.3f}°, {np.degrees(observation[2]):.3f}°]"
                 )
                 print(
-                    f"  Attitude [x,y,z]: [{observation[3]:.3f}, {observation[4]:.3f}, {observation[5]:.3f}]"
-                )
-                print(f"  Target distance: {observation[6]:.3f}")
-                print(
-                    f"  Previous action [r,p,y,t]: [{observation[7]:.3f}, {observation[8]:.3f}, {observation[9]:.3f}, {observation[10]:.3f}]"
-                )
-                print(
-                    f"  Sphere center [x,y]: [{observation[11]:.3f}, {observation[12]:.3f}]"
+                    f"  Sphere center [x,y]: [{observation[3]:.3f}, {observation[4]:.3f}]"
                 )
                 print("-" * 50)
 
