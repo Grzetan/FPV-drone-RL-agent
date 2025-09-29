@@ -37,7 +37,7 @@ class DroneEnv(gym.Env):
                 "use_camera": True,
                 "camera_angle_degrees": -25,
                 "model_dir": "./drone_models",  # Path to your drone models directory, there you can change the mass, thrust, model etc.
-                "drone_model": "whoop",
+                "drone_model": "cf2x",
             },
         )
 
