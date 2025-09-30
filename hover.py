@@ -201,12 +201,12 @@ class DroneEnv(gym.Env):
                     key_states[key_name] = False
 
             # Set controls based on current key states
-            throttle = 1.0 if key_states["up"] else 0.0
+            throttle = 1.0 if key_states["up"] else -1.0
             roll = 0.0
             if key_states["left"]:
-                roll = -10.0
+                roll = -1
             elif key_states["right"]:
-                roll = 10.0
+                roll = 1
 
             # Set action [roll, pitch, yaw, throttle]
             action = np.array([roll, 0.0, 0.0, throttle])

@@ -6,16 +6,18 @@ motor_params:
   tau: 0.01
 
 drag_params:
-  drag_coef_xyz: 3.0
+  drag_coef_xyz: 0.0 # Air resistance?
   drag_area_xyz: 4.0e-4
   drag_coef_pqr: 1.0e-4
 
 control_params:
+
+  # In manual mode (our mode) we only use this controller (ang_vel)
   ang_vel:
     description: "input: angular velocity command | output: normalized angular torque command"
-    kp: [4.0e-2, 4.0e-2, 8.0e-2]
-    ki: [5.0e-7, 5.0e-7, 2.7e-4]
-    kd: [1.0e-4, 1.0e-4, 0.0]
+    kp: [4.0e-2, 4.0e-2, 8.0e-2] # P
+    ki: [5.0e-7, 5.0e-7, 2.7e-4] # I
+    kd: [1.0e-4, 1.0e-4, 0.0] # D
     lim: [1.0, 1.0, 1.0]
 
   ang_pos:

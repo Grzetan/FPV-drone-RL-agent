@@ -1,25 +1,21 @@
 <?xml version="1.0" ?>
-
 <robot name="cf2">
-
   <material name="red">
     <color rgba="1.0 0.0 0.0 1.0"/>
   </material>
-
   <link name="base_link">
-
     <inertial>
       <origin rpy="0 0 0" xyz="0 0 0"/>
-      <mass value="0.027"/>
+      <!-- Mass in kilograms -->
+      <mass value="0.07"/>
+      <!-- How fast the drone rotates around each axis, needs tuning -->
       <inertia ixx="1.4e-5" ixy="0.0" ixz="0.0" iyy="1.4e-5" iyz="0.0" izz="2.17e-5"/>
     </inertial>
-
     <!-- links>
       <carlos url="https://arxiv.org/pdf/1608.05786.pdf" />
       <julian url="http://mikehamer.info/assets/papers/Crazyflie%20Modelling.pdf" />
       <mit url="http://groups.csail.mit.edu/robotics-center/public_papers/Landry15.pdf" />
     </links -->
-
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
@@ -27,16 +23,13 @@
       </geometry>
       <material name="red"/>
     </visual>
-
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
         <box size="0.09 0.09 0.02"/>
       </geometry>
     </collision>
-
   </link>
-
   <link name="prop1_link">
     <inertial>
       <origin rpy="0 0 0" xyz="0.028 -0.028 0"/>
@@ -48,7 +41,6 @@
     <parent link="base_link"/>
     <child link="prop1_link"/>
   </joint>
-
   <link name="prop2_link">
     <inertial>
       <origin rpy="0 0 0" xyz="-0.028 0.028 0"/>
@@ -60,7 +52,6 @@
     <parent link="base_link"/>
     <child link="prop2_link"/>
   </joint>
-
   <link name="prop3_link">
     <inertial>
       <origin rpy="0 0 0" xyz="0.028 0.028 0"/>
@@ -72,7 +63,6 @@
     <parent link="base_link"/>
     <child link="prop3_link"/>
   </joint>
-
   <link name="prop4_link">
     <inertial>
       <origin rpy="0 0 0" xyz="-0.028 -0.028 0"/>
@@ -84,7 +74,6 @@
     <parent link="base_link"/>
     <child link="prop4_link"/>
   </joint>
-
   <link name="center_of_mass_link">
     <inertial>
       <origin rpy="0 0 0" xyz="0 0 0"/>
@@ -96,7 +85,6 @@
     <parent link="base_link"/>
     <child link="center_of_mass_link"/>
   </joint>
-
   <link name="body">
     <inertial>
       <origin rpy="0 0 0" xyz="0 0 0"/>
@@ -110,5 +98,4 @@
     <origin xyz="0 0 0"/>
     <axis xyz="0 0 0"/>
   </joint>
-
 </robot>
