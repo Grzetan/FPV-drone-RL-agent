@@ -6,10 +6,10 @@
   <link name="base_link">
     <inertial>
       <origin rpy="0 0 0" xyz="0 0 0"/>
-      <!-- Mass in kilograms -->
-      <mass value="0.025"/>
-      <!-- How fast the drone rotates around each axis, needs tuning -->
-      <inertia ixx="1.0e-5" ixy="0.0" ixz="0.0" iyy="1.0e-5" iyz="0.0" izz="2.0e-5"/>
+      <!-- Mass in kilograms - Reduced to typical tinywhoop mass -->
+      <mass value="0.1"/>
+      <!-- Increased rotational inertia for more responsive rotation -->
+      <inertia ixx="3e-5" ixy="0.0" ixz="0.0" iyy="3e-5" iyz="0.0" izz="5e-5"/>
     </inertial>
     <!-- links>
       <carlos url="https://arxiv.org/pdf/1608.05786.pdf" />

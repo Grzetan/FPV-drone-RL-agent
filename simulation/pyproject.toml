@@ -6,9 +6,11 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "gymnasium>=1.1.1",
-    "numpy>=2.2.6",
+    "numpy>=2.0",
     "opencv-python>=4.11.0.86",
     "pyflyt>=0.21.0",
+    "pygame>=2.6.1",
+    "pyserial>=3.5",
     "stable-baselines3>=2.6.0",
     "standard-imghdr>=3.13.0",
     "tensorboard>=2.19.0",
