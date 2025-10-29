@@ -7,6 +7,8 @@ import pygame
 import time
 import threading
 from queue import Queue
+from stable_baselines3.common.env_checker import check_env
+
 
 # from stable_baselines3.common.env_checker import check_env
 # from stable_baselines3 import PPO
@@ -345,49 +347,63 @@ class DroneEnv(gym.Env):
     def step(self, action):
         self.action = action.copy()
 
+        # Ustaw akcję w symulatorze
         self.env.set_setpoint(0, action)
-
         for _ in range(5):
             self.env.step()
 
         sensors = self.env.state(0)
+        pos = sensors[-1]          # pozycja drona [x, y, z]
+        attitude = sensors[1]      # orientacja (roll, pitch, yaw)
+        rgba_image = self.env.drones[0].rgbaImg
+        sphere_center = self.detect_red_sphere_center(rgba_image)
 
-        self.reward = -0.1
+        # --- oblicz błędy ---
+        # odległość od celu (środka świata)
+        distance = np.linalg.norm(pos - self.target_pos)
 
-        if self.step_count > self.max_steps:
-            self.truncation |= True
+        # przechylenie (roll i pitch)
+        tilt = np.linalg.norm(attitude[:2])
 
-        # if anything hits the floor, basically game over
+        # pozycja kulki w kadrze (środek = [0,0])
+        center_distance = np.linalg.norm(sphere_center)
+
+        # prędkość yaw (żeby się nie kręcił)
+        yaw_rate = abs(sensors[0][2])
+
+        # --- funkcja kosztu ---
+        cost = (
+            1.0 * distance +      # trzymaj pozycję
+            0.5 * tilt +          # nie przechylaj się
+            0.3 * yaw_rate +      # nie obracaj się
+            2.0 * center_distance # trzymaj kulkę w środku kadru
+        )
+
+        # --- funkcja nagrody ---
+        reward = -cost
+
+        # bonus za stabilność (jeśli blisko celu)
+        if distance < 0.2 and center_distance < 0.1:
+            reward += 5.0
+
+        # kara za rozbicie / wyjście poza obszar
         if np.any(self.env.contact_array[self.env.planeId]):
-            self.reward = -100.0
+            reward = -100.0
+            self.termination = True
             self.info["collision"] = True
-            self.termination |= True
 
-        # exceed flight dome
-        if np.linalg.norm(sensors[3]) > self.flight_dome_size:
-            self.reward = -100.0
+        if np.linalg.norm(pos) > self.flight_dome_size:
+            reward = -100.0
+            self.termination = True
             self.info["out_of_bounds"] = True
-            self.termination |= True
 
-        linear_distance = np.linalg.norm(
-            self.env.state(0)[-1] - np.array([0.0, 0.0, 1.0])
-        )
-        # Negative Reward For High Yaw rate, To prevent high yaw while training
-        yaw_rate = abs(sensors[0][2])  # Assuming z-axis is the last component
-        yaw_rate_penalty = 0.01 * yaw_rate**2  # Add penalty for high yaw rate
-        self.reward -= (
-            yaw_rate_penalty  # You can adjust the coefficient (0.01) as needed
-        )
-
-        # how far are we from 0 roll pitch
-        angular_distance = np.linalg.norm(self.env.state(0)[1][:2])
-
-        self.reward -= linear_distance + angular_distance
-        self.reward += 1.0
-
+        # aktualizacja stanu
         self.step_count += 1
+        if self.step_count > self.max_steps:
+            self.truncation = True
+
         obs = self.create_observation(sensors)
-        return obs, self.reward, self.termination, self.truncation, self.info
+        return obs, reward, self.termination, self.truncation, self.info
 
     def test_env_with_joystick(self, joystick_index=0):
         """
@@ -538,6 +554,7 @@ class DroneEnv(gym.Env):
 if __name__ == "__main__":
     # Just display the environment without training
     env = DroneEnv(render=True)  # Enable rendering
+    check_env(env)
     obs, _ = env.reset()
 
     print("Environment loaded. Starting RadioMaster Pocket control...")
