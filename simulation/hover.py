@@ -152,17 +152,14 @@ class RadioMasterJoystick:
 class DroneEnv(gym.Env):
     def __init__(self, render=False):
         super(DroneEnv, self).__init__()
-
-        self.target_pos = np.array([0, 0, 3], dtype=np.float32)
-
         # [<-1, 1>: roll, <-1, 1>: pitch, <-1, 1>: yaw, <-1, 1>: throttle]
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(4,), dtype=np.float32)
 
-        # Observation space: [attitude_xyz, sphere_center_xy]
-        low_bounds = np.array([-1] * 3 + [-1] * 2, dtype=np.float32)
-        high_bounds = np.array([1] * 3 + [1] * 2, dtype=np.float32)
+        # Observation space: [attitude_xyz (3), sphere_center_xy (2), previous_raw_action (4)]
+        low_bounds = np.array([-1] * 3 + [-1] * 2 + [-1] * 4, dtype=np.float32)
+        high_bounds = np.array([1] * 3 + [1] * 2 + [1] * 4, dtype=np.float32)
         self.observation_space = spaces.Box(
-            low=low_bounds, high=high_bounds, shape=(5,), dtype=np.float32
+            low=low_bounds, high=high_bounds, shape=(9,), dtype=np.float32
         )
 
         start_pos = np.array([[0.0, 0.0, 0.0]])
@@ -182,11 +179,13 @@ class DroneEnv(gym.Env):
         )
 
         self.add_sphere()
-        self.add_reference_structures()
+        # self.add_reference_structures()
 
         self.env.set_mode(0)
 
         self.action = np.zeros(4, dtype=np.float32)
+        self.last_raw_action = np.array([-1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        self.current_raw_action = np.zeros(4, dtype=np.float32)
 
         self.termination = False
         self.truncation = False
@@ -329,7 +328,7 @@ class DroneEnv(gym.Env):
         sphere_center = self.detect_red_sphere_center(rgba_image)
 
         return np.concatenate(
-            (attitude_data, sphere_center),
+            (attitude_data, sphere_center, self.last_raw_action),
             dtype=np.float32,
         )
 
@@ -339,70 +338,79 @@ class DroneEnv(gym.Env):
         # self.add_reference_structures()
         sensors = self.env.state(0)
         self.action = np.zeros(4, dtype=np.float32)
+        self.last_raw_action = np.array([-1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        self.current_raw_action = np.zeros(4, dtype=np.float32)
         self.step_count = 0
+        self.termination = False
+        self.truncation = False
+        self.info = {}
 
         obs = self.create_observation(sensors)
         return obs, {}
 
+    def compute_reward(self, obs):
+        sphere_x = obs[3]
+        sphere_y = obs[4]
+
+        # if sphere is not detected, reward is -100.0
+        if sphere_x == -1 and sphere_y == -1:
+            self.reward = -100.0
+            return self.reward
+
+        # base: minimize screen-center distance of sphere
+        distance = np.sqrt(sphere_x ** 2 + sphere_y ** 2)
+        reward = -distance
+
+        # penalty for abrupt action changes (use raw actions in [-1, 1])
+        action_delta = self.current_raw_action - self.last_raw_action
+        reward -= 0.5 * float(np.linalg.norm(action_delta))
+
+        # penalty for excessive roll/pitch (> 30 degrees)
+        roll_rad = obs[0]
+        pitch_rad = obs[1]
+        threshold = np.radians(30.0)
+        roll_excess = max(0.0, abs(float(roll_rad)) - threshold)
+        pitch_excess = max(0.0, abs(float(pitch_rad)) - threshold)
+        reward -= 2.0 * (roll_excess + pitch_excess)
+
+        self.reward = float(reward)
+        return self.reward
+        
+
     def step(self, action):
+        # capture current raw action in [-1, 1] range; keep last_raw_action for reward/obs
+        self.current_raw_action = action.copy()
+        action[0] *= 30.0 
+        action[1] *= 30.0
+        action[2] *= -30.0
+        action[3] = (action[3] + 1) / 2  # Throttle: keep normalized 0-1
+
         self.action = action.copy()
 
-        # Ustaw akcję w symulatorze
         self.env.set_setpoint(0, action)
+
         for _ in range(5):
             self.env.step()
 
         sensors = self.env.state(0)
-        pos = sensors[-1]          # pozycja drona [x, y, z]
-        attitude = sensors[1]      # orientacja (roll, pitch, yaw)
-        rgba_image = self.env.drones[0].rgbaImg
-        sphere_center = self.detect_red_sphere_center(rgba_image)
 
-        # --- oblicz błędy ---
-        # odległość od celu (środka świata)
-        distance = np.linalg.norm(pos - self.target_pos)
+        # reset info dict for this step
+        self.info = {}
 
-        # przechylenie (roll i pitch)
-        tilt = np.linalg.norm(attitude[:2])
-
-        # pozycja kulki w kadrze (środek = [0,0])
-        center_distance = np.linalg.norm(sphere_center)
-
-        # prędkość yaw (żeby się nie kręcił)
-        yaw_rate = abs(sensors[0][2])
-
-        # --- funkcja kosztu ---
-        cost = (
-            1.0 * distance +      # trzymaj pozycję
-            0.5 * tilt +          # nie przechylaj się
-            0.3 * yaw_rate +      # nie obracaj się
-            2.0 * center_distance # trzymaj kulkę w środku kadru
-        )
-
-        # --- funkcja nagrody ---
-        reward = -cost
-
-        # bonus za stabilność (jeśli blisko celu)
-        if distance < 0.2 and center_distance < 0.1:
-            reward += 5.0
-
-        # kara za rozbicie / wyjście poza obszar
-        if np.any(self.env.contact_array[self.env.planeId]):
-            reward = -100.0
-            self.termination = True
-            self.info["collision"] = True
-
-        if np.linalg.norm(pos) > self.flight_dome_size:
-            reward = -100.0
-            self.termination = True
-            self.info["out_of_bounds"] = True
-
-        # aktualizacja stanu
-        self.step_count += 1
-        if self.step_count > self.max_steps:
+        if self.step_count >= self.max_steps:
             self.truncation = True
 
+        if np.linalg.norm(sensors[3]) > self.flight_dome_size:
+            self.info["out_of_bounds"] = True
+            self.termination = True
+
+        self.step_count += 1
         obs = self.create_observation(sensors)
+        reward = self.compute_reward(obs)
+
+        # after computing reward/obs, update last_raw_action for next step
+        self.last_raw_action = self.current_raw_action.copy()
+
         return obs, reward, self.termination, self.truncation, self.info
 
     def test_env_with_joystick(self, joystick_index=0):

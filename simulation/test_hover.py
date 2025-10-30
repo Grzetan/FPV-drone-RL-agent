@@ -1,14 +1,13 @@
 from stable_baselines3 import PPO
-from hover import DroneEnv  # Assuming you have the DroneEnv class defined in hover.py
+from hover import DroneEnv
 
-# Load the trained model - replace 'PPO' with the algorithm you used and 'path_to_model' with your model's path
-model = PPO.load("models/ppo_quadx_hover")
-
-# Test the trained model
+model = PPO.load("ppo_hover_checkpoints/ppo_hover_4096_steps_1182364.5.zip")
 env = DroneEnv(render=True)
-obs, _ = env.reset()
-term, trunc = False, False
 
-while not (term or trunc):
-    action, _ = model.predict(obs, deterministic=True)
-    obs, reward, term, trunc, _ = env.step(action)
+obs, _ = env.reset()
+for _ in range(1000):
+    action, _ = model.predict(obs)
+    print(action)
+    obs, reward, done, truncated, info = env.step(action)
+    if done or truncated:
+        break
