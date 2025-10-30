@@ -348,7 +348,7 @@ class DroneEnv(gym.Env):
         obs = self.create_observation(sensors)
         return obs, {}
 
-    def compute_reward(self, obs):
+    def calculate_reward(self, obs):
         sphere_x = obs[3]
         sphere_y = obs[4]
 
@@ -360,10 +360,13 @@ class DroneEnv(gym.Env):
         # base: minimize screen-center distance of sphere
         distance = np.sqrt(sphere_x ** 2 + sphere_y ** 2)
         reward = -distance
+        # print(f"Reward after disatnce check: {reward}")
 
         # penalty for abrupt action changes (use raw actions in [-1, 1])
         action_delta = self.current_raw_action - self.last_raw_action
         reward -= 0.5 * float(np.linalg.norm(action_delta))
+        # print(f"Action delta: {action_delta}")
+        # print(f"Reward after action change check: {reward}")
 
         # penalty for excessive roll/pitch (> 30 degrees)
         roll_rad = obs[0]
@@ -372,6 +375,7 @@ class DroneEnv(gym.Env):
         roll_excess = max(0.0, abs(float(roll_rad)) - threshold)
         pitch_excess = max(0.0, abs(float(pitch_rad)) - threshold)
         reward -= 2.0 * (roll_excess + pitch_excess)
+        # print(f"Reward after roll/pitch check: {reward}")
 
         self.reward = float(reward)
         return self.reward
@@ -389,7 +393,7 @@ class DroneEnv(gym.Env):
 
         self.env.set_setpoint(0, action)
 
-        for _ in range(5):
+        for _ in range(1):
             self.env.step()
 
         sensors = self.env.state(0)
@@ -406,7 +410,7 @@ class DroneEnv(gym.Env):
 
         self.step_count += 1
         obs = self.create_observation(sensors)
-        reward = self.compute_reward(obs)
+        reward = self.calculate_reward(obs)
 
         # after computing reward/obs, update last_raw_action for next step
         self.last_raw_action = self.current_raw_action.copy()
@@ -436,22 +440,11 @@ class DroneEnv(gym.Env):
             while True:
                 # Get joystick controls
                 action = joystick.get_action_array()
- 
-                action[0] *= 30.0 
-                action[1] *= 30.0
-                action[2] *= -30.0
-                action[3] = (action[3] + 1) / 2  # Throttle: keep normalized 0-1
-
+                print(f"Action: {action}")
                 # Apply action to drone
                 self.env.set_setpoint(0, action)
-                self.env.step()
-                
-                # Get camera frame
+                observation, reward, termination, truncation, info = self.step(action)
                 rgba_frame = self.env.drones[0].rgbaImg
-                
-                # Get full observation space
-                sensors = self.env.state(0)
-                observation = self.create_observation(sensors)
                 
                 # Print status every 10 iterations
                 if iteration % 10 == 0:
@@ -485,78 +478,6 @@ class DroneEnv(gym.Env):
             except:
                 pass
             cv2.destroyAllWindows()
-
-    def test_env(self):
-        print("Controls:")
-        print("  UP arrow = throttle 1.0")
-        print("  LEFT arrow = roll left (-1.0)")
-        print("  RIGHT arrow = roll right (+1.0)")
-        print("  Press 'q' to quit, 'ESC' to exit")
-
-        # Initialize persistent key states with timing
-        import time
-
-        key_states = {"up": False, "left": False, "right": False}
-        key_timers = {"up": 0, "left": 0, "right": 0}
-        key_timeout = 0.05  # Reduced timeout for more responsive controls
-
-        for i in range(10000):
-            current_time = time.time()
-
-            # Keyboard control with very short wait time
-            key = cv2.waitKey(1) & 0xFF
-
-            # Update key states and timers when keys are pressed
-            if key == 82:  # UP arrow key
-                key_states["up"] = True
-                key_timers["up"] = current_time
-            elif key == 81:  # LEFT arrow key
-                key_states["left"] = True
-                key_timers["left"] = current_time
-            elif key == 83:  # RIGHT arrow key
-                key_states["right"] = True
-                key_timers["right"] = current_time
-            elif key == ord("q") or key == 27:  # 'q' or ESC key
-                break
-
-            # Reset key states if timeout exceeded
-            for key_name in key_states:
-                if current_time - key_timers[key_name] > key_timeout:
-                    key_states[key_name] = False
-
-            # Set controls based on current key states - more aggressive values
-            throttle = 1.0 if key_states["up"] else -1.0
-            roll = 0.0
-            if key_states["left"]:
-                roll = -10.0  # Full left roll
-            elif key_states["right"]:
-                roll = 10.0  # Full right roll
-
-            # Set action [roll, pitch, yaw, throttle]
-            action = np.array([roll, 0.0, 0.0, throttle])
-            self.env.set_setpoint(0, action)
-
-            self.env.step()
-            rgba_frame = self.env.drones[0].rgbaImg
-
-            # Get full observation space
-            sensors = self.env.state(0)
-            observation = self.create_observation(sensors)
-
-            # Print observation space with labels (less frequently to reduce spam)
-            if i % 10 == 0:  # Print every 10 iterations instead of every iteration
-                print(f"Iteration {i} - Roll: {roll:.1f}, Throttle: {throttle:.1f}")
-                print(
-                    f"  Attitude [x,y,z]: [{np.degrees(observation[0]):.3f}°, {np.degrees(observation[1]):.3f}°, {np.degrees(observation[2]):.3f}°]"
-                )
-                print(
-                    f"  Sphere center [x,y]: [{observation[3]:.3f}, {observation[4]:.3f}]"
-                )
-                print("-" * 50)
-
-            # Convert to BGR for display
-            frame = cv2.cvtColor(rgba_frame.astype(np.uint8), cv2.COLOR_RGBA2BGR)
-            cv2.imshow("Camera View", frame)
 
 
 if __name__ == "__main__":

@@ -2,10 +2,9 @@ from hover import DroneEnv
 from stable_baselines3.common.vec_env import DummyVecEnv
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.env_util import make_vec_env
+from stable_baselines3.common.vec_env import SubprocVecEnv
 import os
-
-env = DroneEnv(render=False)
-env = DummyVecEnv([lambda: env])
 
 class CheckpointCallback(BaseCallback):
     def __init__(self, save_path: str, name_prefix: str = "rl_model", verbose: int = 0):
@@ -28,20 +27,27 @@ class CheckpointCallback(BaseCallback):
     def _on_step(self) -> bool:
         return True
 
-checkpoint_callback = CheckpointCallback(save_path="./ppo_hover_checkpoints/", name_prefix="ppo_hover", verbose=1)
+def make_env():
+    return DroneEnv(render=False)
 
-model = PPO(
-    policy="MlpPolicy",
-    env=env,
-    verbose=1,
-    tensorboard_log="./tensorboard",
-    n_steps=2048,
-    batch_size=64,
-    n_epochs=10
-)
+if __name__ == "__main__":
+    num_env = 8
+    env = make_vec_env(make_env, n_envs=num_env, vec_env_cls=SubprocVecEnv)
 
-model.learn(total_timesteps=100000, callback=checkpoint_callback)
+    checkpoint_callback = CheckpointCallback(save_path="./ppo_hover_checkpoints/", name_prefix="ppo_hover", verbose=1)
 
-model.save("ppo_hover")
-    
-print("Training complete.")
+    model = PPO(
+        policy="MlpPolicy",
+        env=env,
+        verbose=1,
+        tensorboard_log="./tensorboard",
+        n_steps=2048,
+        batch_size=64,
+        n_epochs=10
+    )
+
+    model.learn(total_timesteps=100000, callback=checkpoint_callback)
+
+    model.save("ppo_hover")
+        
+    print("Training complete.")
