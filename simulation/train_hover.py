@@ -42,11 +42,11 @@ if __name__ == "__main__":
         verbose=1,
         tensorboard_log="./tensorboard",
         n_steps=2048,
-        batch_size=64,
-        n_epochs=10
+        batch_size=128,
+        n_epochs=30
     )
 
-    model.learn(total_timesteps=100000, callback=checkpoint_callback)
+    model.learn(total_timesteps=500000, callback=checkpoint_callback)
 
     model.save("ppo_hover")
         

@@ -1,7 +1,7 @@
 from stable_baselines3 import PPO
 from hover import DroneEnv
 
-model = PPO.load("ppo_hover_checkpoints/ppo_hover_4096_steps_1182364.5.zip")
+model = PPO.load("ppo_hover_checkpoints/ppo_hover_262144_steps_3709393.0.zip")
 env = DroneEnv(render=True)
 
 obs, _ = env.reset()

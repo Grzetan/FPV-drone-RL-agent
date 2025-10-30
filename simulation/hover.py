@@ -352,32 +352,25 @@ class DroneEnv(gym.Env):
         sphere_x = obs[3]
         sphere_y = obs[4]
 
-        # if sphere is not detected, reward is -100.0
-        if sphere_x == -1 and sphere_y == -1:
-            self.reward = -100.0
-            return self.reward
+        self.reward = 0.0
 
-        # base: minimize screen-center distance of sphere
-        distance = np.sqrt(sphere_x ** 2 + sphere_y ** 2)
-        reward = -distance
-        # print(f"Reward after disatnce check: {reward}")
+        sphere_visible = not (sphere_x == -1 and sphere_y == -1)
+        if sphere_visible:
+            self.reward += 1.0
 
-        # penalty for abrupt action changes (use raw actions in [-1, 1])
+            distance = float(np.sqrt(sphere_x ** 2 + sphere_y ** 2))
+            max_dist = np.sqrt(2.0) 
+            proximity_score = max(0.0, 1.0 - distance / max_dist)
+            self.reward += 0.5 * proximity_score
+
         action_delta = self.current_raw_action - self.last_raw_action
-        reward -= 0.5 * float(np.linalg.norm(action_delta))
-        # print(f"Action delta: {action_delta}")
-        # print(f"Reward after action change check: {reward}")
+        delta_norm = float(np.linalg.norm(action_delta))
+        self.reward -= 100 * (delta_norm ** 2)
 
-        # penalty for excessive roll/pitch (> 30 degrees)
-        roll_rad = obs[0]
-        pitch_rad = obs[1]
-        threshold = np.radians(30.0)
-        roll_excess = max(0.0, abs(float(roll_rad)) - threshold)
-        pitch_excess = max(0.0, abs(float(pitch_rad)) - threshold)
-        reward -= 2.0 * (roll_excess + pitch_excess)
-        # print(f"Reward after roll/pitch check: {reward}")
-
-        self.reward = float(reward)
+        roll_rad = float(obs[0])
+        pitch_rad = float(obs[1])
+        self.reward -= 1 * (abs(roll_rad) + abs(pitch_rad))
+        # print(f"Reward: {self.reward}")
         return self.reward
         
 
@@ -440,7 +433,6 @@ class DroneEnv(gym.Env):
             while True:
                 # Get joystick controls
                 action = joystick.get_action_array()
-                print(f"Action: {action}")
                 # Apply action to drone
                 self.env.set_setpoint(0, action)
                 observation, reward, termination, truncation, info = self.step(action)
