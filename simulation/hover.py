@@ -4,17 +4,9 @@ import gymnasium as gym
 from gymnasium import spaces
 from PyFlyt.core import Aviary
 import pygame
-import time
-import threading
-from queue import Queue
 from stable_baselines3.common.env_checker import check_env
-
-
-# from stable_baselines3.common.env_checker import check_env
-# from stable_baselines3 import PPO
-# from stable_baselines3.common.vec_env import DummyVecEnv
-import os
-
+from collections import deque
+import time
 
 class RadioMasterJoystick:
     """
@@ -155,11 +147,13 @@ class DroneEnv(gym.Env):
         # [<-1, 1>: roll, <-1, 1>: pitch, <-1, 1>: yaw, <-1, 1>: throttle]
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(4,), dtype=np.float32)
 
-        # Observation space: [attitude_xyz (3), sphere_center_xy (2), previous_raw_action (4)]
-        low_bounds = np.array([-1] * 3 + [-1] * 2 + [-1] * 4, dtype=np.float32)
-        high_bounds = np.array([1] * 3 + [1] * 2 + [1] * 4, dtype=np.float32)
+        # Observation space: [attitude_xyz (3), sphere_center_xy (2), angular_velocity_xyz (3), last_4_actions (16)]
+        # Total: 3 + 2 + 3 + 16 = 24
+        # Angular velocity is clipped to [-20, 20] rad/s and normalized to [-1, 1]
+        low_bounds = np.array([-1] * 3 + [-1] * 2 + [-1] * 3 + [-1] * 16, dtype=np.float32)
+        high_bounds = np.array([1] * 3 + [1] * 2 + [1] * 3 + [1] * 16, dtype=np.float32)
         self.observation_space = spaces.Box(
-            low=low_bounds, high=high_bounds, shape=(9,), dtype=np.float32
+            low=low_bounds, high=high_bounds, shape=(24,), dtype=np.float32
         )
 
         start_pos = np.array([[0.0, 0.0, 0.0]])
@@ -186,6 +180,23 @@ class DroneEnv(gym.Env):
         self.action = np.zeros(4, dtype=np.float32)
         self.last_raw_action = np.array([-1.0, 0.0, 0.0, 0.0], dtype=np.float32)
         self.current_raw_action = np.zeros(4, dtype=np.float32)
+
+        # Buffer to store last 5 attitude positions with timestamps for angular velocity calculation
+        # Each entry is a tuple of (timestamp, attitude_array)
+        self.attitude_history = deque(maxlen=5)
+        # Initialize with zeros and current time
+        current_time = time.perf_counter()
+        for _ in range(5):
+            self.attitude_history.append((current_time, np.zeros(3, dtype=np.float32)))
+        
+        # Buffer to store last 4 actions (default: [-1, 0, 0, 0])
+        default_action = np.array([-1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        self.action_history = deque(maxlen=4)
+        for _ in range(4):
+            self.action_history.append(default_action.copy())
+        
+        # Angular velocity clipping and normalization parameters
+        self.max_angular_velocity = 20.0  # rad/s
 
         self.termination = False
         self.truncation = False
@@ -320,6 +331,64 @@ class DroneEnv(gym.Env):
                 basePosition=pos
             )
 
+    def calculate_angular_velocity(self):
+        """
+        Calculate angular velocity from the last 5 attitude positions using linear least squares.
+        This method uses all 5 measurements and actual timestamps for robustness against noise
+        and timing irregularities.
+        
+        For each attitude axis (roll, pitch, yaw), we fit a line: attitude = slope * time + intercept
+        The slope is the angular velocity for that axis.
+        
+        The angular velocity is then:
+        1. Clipped to [-20, 20] rad/s
+        2. Normalized to [-1, 1] range for the neural network
+        """
+        if len(self.attitude_history) < 5:
+            return np.zeros(3, dtype=np.float32)
+        
+        # Extract timestamps and attitudes
+        timestamps = np.array([t for t, _ in self.attitude_history], dtype=np.float64)
+        attitudes = np.array([att for _, att in self.attitude_history], dtype=np.float32)
+        
+        # Check if we have enough time variation (avoid division by zero)
+        time_span = timestamps[-1] - timestamps[0]
+        if time_span < 1e-6:  # Less than 1 microsecond
+            return np.zeros(3, dtype=np.float32)
+        
+        # Normalize timestamps to improve numerical stability (center around 0)
+        t_mean = np.mean(timestamps)
+        t_normalized = timestamps - t_mean
+        
+        # Calculate angular velocity for each axis using least squares
+        # We're fitting: attitude[i] = velocity * t + offset
+        # Using the normal equation: velocity = (X^T X)^-1 X^T y
+        # For simple linear regression: velocity = cov(t, attitude) / var(t)
+        angular_velocity = np.zeros(3, dtype=np.float32)
+        
+        for axis in range(3):
+            attitude_axis = attitudes[:, axis]
+            
+            # Simple least squares solution for slope
+            # slope = sum((t - t_mean) * (att - att_mean)) / sum((t - t_mean)^2)
+            att_mean = np.mean(attitude_axis)
+            numerator = np.sum(t_normalized * (attitude_axis - att_mean))
+            denominator = np.sum(t_normalized ** 2)
+            
+            if abs(denominator) > 1e-10:
+                angular_velocity[axis] = numerator / denominator
+            else:
+                angular_velocity[axis] = 0.0
+        
+        # Clip angular velocity to [-max_angular_velocity, +max_angular_velocity]
+        angular_velocity = np.clip(angular_velocity, -self.max_angular_velocity, self.max_angular_velocity)
+        
+        # Normalize to [-1, 1] range for the neural network
+        # -20 rad/s -> -1, 0 rad/s -> 0, +20 rad/s -> +1
+        angular_velocity_normalized = angular_velocity / self.max_angular_velocity
+        
+        return angular_velocity_normalized.astype(np.float32)
+    
     def create_observation(self, sensors):
         attitude_data = sensors[1]
 
@@ -327,8 +396,14 @@ class DroneEnv(gym.Env):
         rgba_image = self.env.drones[0].rgbaImg
         sphere_center = self.detect_red_sphere_center(rgba_image)
 
+        # Calculate angular velocity from attitude history
+        angular_velocity = self.calculate_angular_velocity()
+        
+        # Flatten last 4 actions into a single array
+        last_4_actions = np.concatenate(list(self.action_history), dtype=np.float32)
+
         return np.concatenate(
-            (attitude_data, sphere_center, self.last_raw_action),
+            (attitude_data, sphere_center, angular_velocity, last_4_actions),
             dtype=np.float32,
         )
 
@@ -340,6 +415,19 @@ class DroneEnv(gym.Env):
         self.action = np.zeros(4, dtype=np.float32)
         self.last_raw_action = np.array([-1.0, 0.0, 0.0, 0.0], dtype=np.float32)
         self.current_raw_action = np.zeros(4, dtype=np.float32)
+        
+        # Reset attitude history buffer with timestamps
+        self.attitude_history.clear()
+        current_time = time.perf_counter()
+        for _ in range(5):
+            self.attitude_history.append((current_time, np.zeros(3, dtype=np.float32)))
+        
+        # Reset action history buffer
+        default_action = np.array([-1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        self.action_history.clear()
+        for _ in range(4):
+            self.action_history.append(default_action.copy())
+        
         self.step_count = 0
         self.termination = False
         self.truncation = False
@@ -365,7 +453,7 @@ class DroneEnv(gym.Env):
 
         action_delta = self.current_raw_action - self.last_raw_action
         delta_norm = float(np.linalg.norm(action_delta))
-        self.reward -= 100 * (delta_norm ** 2)
+        self.reward -= 1 * (delta_norm ** 2)
 
         roll_rad = float(obs[0])
         pitch_rad = float(obs[1])
@@ -390,6 +478,14 @@ class DroneEnv(gym.Env):
             self.env.step()
 
         sensors = self.env.state(0)
+        
+        # Update attitude history with current attitude and timestamp
+        attitude_data = sensors[1]
+        current_time = time.perf_counter()
+        self.attitude_history.append((current_time, attitude_data.copy()))
+        
+        # Update action history with current raw action
+        self.action_history.append(self.current_raw_action.copy())
 
         # reset info dict for this step
         self.info = {}

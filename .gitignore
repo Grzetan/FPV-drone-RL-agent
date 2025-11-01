@@ -6,6 +6,7 @@ __pycache__/
 # C extensions
 *.so
 
+ppo_hover_checkpoints/*
 models/
 logs/
 # Distribution / packaging
