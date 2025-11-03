@@ -6,7 +6,7 @@ from PyFlyt.core import Aviary
 import pygame
 from stable_baselines3.common.env_checker import check_env
 from collections import deque
-import time
+import random
 
 class RadioMasterJoystick:
     """
@@ -157,13 +157,15 @@ class DroneEnv(gym.Env):
         )
 
         start_pos = np.array([[0.0, 0.0, 0.0]])
-        start_orn = np.array([[0.0, 0.0, 0.0]])
+        start_orn = np.array([[0.0, 0.0, np.random.uniform(-np.pi, np.pi)]])
 
+        self.physics_hz = 240.0  # PyFlyt simulation runs at 240 Hz
         self.env = Aviary(
             start_pos=start_pos,
             start_orn=start_orn,
             render=render,
             drone_type="quadx",
+            physics_hz=self.physics_hz,
             drone_options={
                 "use_camera": True,
                 "camera_angle_degrees": -25,
@@ -178,25 +180,25 @@ class DroneEnv(gym.Env):
         self.env.set_mode(0)
 
         self.action = np.zeros(4, dtype=np.float32)
-        self.last_raw_action = np.array([-1.0, 0.0, 0.0, 0.0], dtype=np.float32)
-        self.current_raw_action = np.zeros(4, dtype=np.float32)
 
-        # Buffer to store last 5 attitude positions with timestamps for angular velocity calculation
-        # Each entry is a tuple of (timestamp, attitude_array)
+        # Physics parameters
+        self.dt = 1.0 / self.physics_hz  # Time step between physics updates
+        
+        # Buffer to store last 5 attitude positions for angular velocity calculation
+        # Each entry is just the attitude array (roll, pitch, yaw)
         self.attitude_history = deque(maxlen=5)
-        # Initialize with zeros and current time
-        current_time = time.perf_counter()
+        # Initialize with zeros
         for _ in range(5):
-            self.attitude_history.append((current_time, np.zeros(3, dtype=np.float32)))
+            self.attitude_history.append(np.zeros(3, dtype=np.float32))
         
         # Buffer to store last 4 actions (default: [-1, 0, 0, 0])
-        default_action = np.array([-1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        default_action = np.array([0.0, 0.0, 0.0, -1.0], dtype=np.float32)
         self.action_history = deque(maxlen=4)
         for _ in range(4):
             self.action_history.append(default_action.copy())
         
-        # Angular velocity clipping and normalization parameters
-        self.max_angular_velocity = 20.0  # rad/s
+        # Angular velocity clipping and normalization parameters per axis [roll, pitch, yaw]
+        self.max_angular_velocity = np.array([20.0, 20.0, 35.0], dtype=np.float32)  # rad/s
 
         self.termination = False
         self.truncation = False
@@ -332,29 +334,15 @@ class DroneEnv(gym.Env):
             )
 
     def calculate_angular_velocity(self):
-        """
-        Calculate angular velocity from the last 5 attitude positions using linear least squares.
-        This method uses all 5 measurements and actual timestamps for robustness against noise
-        and timing irregularities.
-        
-        For each attitude axis (roll, pitch, yaw), we fit a line: attitude = slope * time + intercept
-        The slope is the angular velocity for that axis.
-        
-        The angular velocity is then:
-        1. Clipped to [-20, 20] rad/s
-        2. Normalized to [-1, 1] range for the neural network
-        """
         if len(self.attitude_history) < 5:
             return np.zeros(3, dtype=np.float32)
         
-        # Extract timestamps and attitudes
-        timestamps = np.array([t for t, _ in self.attitude_history], dtype=np.float64)
-        attitudes = np.array([att for _, att in self.attitude_history], dtype=np.float32)
+        # Extract attitudes (no timestamps needed - we use fixed dt)
+        attitudes = np.array(list(self.attitude_history), dtype=np.float32)
         
-        # Check if we have enough time variation (avoid division by zero)
-        time_span = timestamps[-1] - timestamps[0]
-        if time_span < 1e-6:  # Less than 1 microsecond
-            return np.zeros(3, dtype=np.float32)
+        # Create time array with fixed dt: [0, dt, 2*dt, 3*dt, 4*dt]
+        # This represents time steps with indices 0-4
+        timestamps = np.arange(5, dtype=np.float64) * self.dt
         
         # Normalize timestamps to improve numerical stability (center around 0)
         t_mean = np.mean(timestamps)
@@ -362,7 +350,6 @@ class DroneEnv(gym.Env):
         
         # Calculate angular velocity for each axis using least squares
         # We're fitting: attitude[i] = velocity * t + offset
-        # Using the normal equation: velocity = (X^T X)^-1 X^T y
         # For simple linear regression: velocity = cov(t, attitude) / var(t)
         angular_velocity = np.zeros(3, dtype=np.float32)
         
@@ -379,18 +366,19 @@ class DroneEnv(gym.Env):
                 angular_velocity[axis] = numerator / denominator
             else:
                 angular_velocity[axis] = 0.0
+            
+        angular_velocity_clipped = np.clip(
+            angular_velocity, 
+            -self.max_angular_velocity, 
+            self.max_angular_velocity
+        )
         
-        # Clip angular velocity to [-max_angular_velocity, +max_angular_velocity]
-        angular_velocity = np.clip(angular_velocity, -self.max_angular_velocity, self.max_angular_velocity)
-        
-        # Normalize to [-1, 1] range for the neural network
-        # -20 rad/s -> -1, 0 rad/s -> 0, +20 rad/s -> +1
-        angular_velocity_normalized = angular_velocity / self.max_angular_velocity
-        
+        # Normalize to [-1, 1] range per axis by dividing by max for each axis
+        angular_velocity_normalized = angular_velocity_clipped / self.max_angular_velocity        
         return angular_velocity_normalized.astype(np.float32)
     
     def create_observation(self, sensors):
-        attitude_data = sensors[1]
+        attitude_data = sensors[1] / np.pi
 
         # Get camera image and detect red sphere center
         rgba_image = self.env.drones[0].rgbaImg
@@ -402,6 +390,7 @@ class DroneEnv(gym.Env):
         # Flatten last 4 actions into a single array
         last_4_actions = np.concatenate(list(self.action_history), dtype=np.float32)
 
+        # print("angular_velocity", np.round(angular_velocity, 3))
         return np.concatenate(
             (attitude_data, sphere_center, angular_velocity, last_4_actions),
             dtype=np.float32,
@@ -409,21 +398,20 @@ class DroneEnv(gym.Env):
 
     def reset(self, seed=None, options=None):
         self.env.reset()
+        self.env.start_orn = np.array([[0.0, 0.0, np.random.uniform(-np.pi, np.pi)]])
+
         self.add_sphere()
         # self.add_reference_structures()
         sensors = self.env.state(0)
-        self.action = np.zeros(4, dtype=np.float32)
-        self.last_raw_action = np.array([-1.0, 0.0, 0.0, 0.0], dtype=np.float32)
-        self.current_raw_action = np.zeros(4, dtype=np.float32)
+        self.action = np.array([0.0, 0.0, 0.0, -1.0], dtype=np.float32)
         
-        # Reset attitude history buffer with timestamps
+        # Reset attitude history buffer
         self.attitude_history.clear()
-        current_time = time.perf_counter()
         for _ in range(5):
-            self.attitude_history.append((current_time, np.zeros(3, dtype=np.float32)))
+            self.attitude_history.append(np.zeros(3, dtype=np.float32))
         
         # Reset action history buffer
-        default_action = np.array([-1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        default_action = np.array([0.0, 0.0, 0.0, -1.0], dtype=np.float32)
         self.action_history.clear()
         for _ in range(4):
             self.action_history.append(default_action.copy())
@@ -446,25 +434,23 @@ class DroneEnv(gym.Env):
         if sphere_visible:
             self.reward += 1.0
 
-            distance = float(np.sqrt(sphere_x ** 2 + sphere_y ** 2))
+            distance = float(np.sqrt(sphere_x ** 2 + 0 ** 2)) # TODO: fix this
             max_dist = np.sqrt(2.0) 
             proximity_score = max(0.0, 1.0 - distance / max_dist)
-            self.reward += 0.5 * proximity_score
-
-        action_delta = self.current_raw_action - self.last_raw_action
-        delta_norm = float(np.linalg.norm(action_delta))
-        self.reward -= 1 * (delta_norm ** 2)
+            self.reward += 1 * proximity_score
 
         roll_rad = float(obs[0])
         pitch_rad = float(obs[1])
         self.reward -= 1 * (abs(roll_rad) + abs(pitch_rad))
+
         # print(f"Reward: {self.reward}")
         return self.reward
         
 
     def step(self, action):
-        # capture current raw action in [-1, 1] range; keep last_raw_action for reward/obs
-        self.current_raw_action = action.copy()
+        # Store the raw action in history before scaling
+        raw_action = action.copy()
+        
         action[0] *= 30.0 
         action[1] *= 30.0
         action[2] *= -30.0
@@ -479,13 +465,12 @@ class DroneEnv(gym.Env):
 
         sensors = self.env.state(0)
         
-        # Update attitude history with current attitude and timestamp
+        # Update attitude history with current attitude (no timestamp needed - fixed dt)
         attitude_data = sensors[1]
-        current_time = time.perf_counter()
-        self.attitude_history.append((current_time, attitude_data.copy()))
+        self.attitude_history.append(attitude_data.copy())
         
-        # Update action history with current raw action
-        self.action_history.append(self.current_raw_action.copy())
+        # Update action history with raw action (before scaling)
+        self.action_history.append(raw_action)
 
         # reset info dict for this step
         self.info = {}
@@ -500,9 +485,6 @@ class DroneEnv(gym.Env):
         self.step_count += 1
         obs = self.create_observation(sensors)
         reward = self.calculate_reward(obs)
-
-        # after computing reward/obs, update last_raw_action for next step
-        self.last_raw_action = self.current_raw_action.copy()
 
         return obs, reward, self.termination, self.truncation, self.info
 
@@ -522,6 +504,7 @@ class DroneEnv(gym.Env):
             print("  Axis 1: Pitch (forward/backward)")
             print("  Axis 2: Throttle (up/down)")
             print("  Axis 3: Yaw (rotation)")
+            print("  Press 'R' to reset environment")
             print("  Press 'q' or ESC to quit")
             print("-" * 50)
             
@@ -532,6 +515,7 @@ class DroneEnv(gym.Env):
                 # Apply action to drone
                 self.env.set_setpoint(0, action)
                 observation, reward, termination, truncation, info = self.step(action)
+
                 rgba_frame = self.env.drones[0].rgbaImg
                 
                 # Print status every 10 iterations
@@ -547,10 +531,17 @@ class DroneEnv(gym.Env):
                 frame = cv2.cvtColor(rgba_frame.astype(np.uint8), cv2.COLOR_RGBA2BGR)
                 cv2.imshow("RadioMaster Pocket Control", frame)
                 
-                # Check for quit key
+                # Check for keyboard input
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord('q') or key == 27:  # 'q' or ESC
                     break
+                elif key == ord('r') or key == ord('R'):  # 'r' or 'R' to reset
+                    print("\nResetting environment...")
+                    observation, _ = self.reset()
+                    iteration = 0
+                    print("Environment reset complete!")
+                    print("-" * 50)
+                    continue
                 
                 iteration += 1
                 
