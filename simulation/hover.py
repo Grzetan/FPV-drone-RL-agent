@@ -147,17 +147,32 @@ class DroneEnv(gym.Env):
         # [<-1, 1>: roll, <-1, 1>: pitch, <-1, 1>: yaw, <-1, 1>: throttle]
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(4,), dtype=np.float32)
 
-        # Observation space: [attitude_xyz (3), sphere_center_xy (2), angular_velocity_xyz (3), last_4_actions (16)]
-        # Total: 3 + 2 + 3 + 16 = 24
+        # Observation space: [attitude_xyz (3), angular_velocity_xyz (3), last_4_actions (16), last_4_sphere_history (12)]
+        # Total: 3 + 3 + 16 + 12 = 34
         # Angular velocity is clipped to [-20, 20] rad/s and normalized to [-1, 1]
-        low_bounds = np.array([-1] * 3 + [-1] * 2 + [-1] * 3 + [-1] * 16, dtype=np.float32)
-        high_bounds = np.array([1] * 3 + [1] * 2 + [1] * 3 + [1] * 16, dtype=np.float32)
+        # Sphere history: 4 entries of [center_x, center_y, size] each = 12 values (last entry is most recent)
+        # Structure: [x1, y1, size1, x2, y2, size2, x3, y3, size3, x4, y4, size4]
+        # Each center_x, center_y, size: [-1, 1]
+        low_bounds = np.array(
+            [-1] * 3 +  # attitude
+            [-1] * 3 +  # angular_velocity
+            [-1] * 16 +  # actions
+            [-1] * 12,  # sphere history: [x, y, size] × 4
+            dtype=np.float32
+        )
+        high_bounds = np.array(
+            [1] * 3 +  # attitude
+            [1] * 3 +  # angular_velocity
+            [1] * 16 +  # actions
+            [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],  # sphere history: [x, y, size] × 4
+            dtype=np.float32
+        )
         self.observation_space = spaces.Box(
-            low=low_bounds, high=high_bounds, shape=(24,), dtype=np.float32
+            low=low_bounds, high=high_bounds, shape=(34,), dtype=np.float32
         )
 
         start_pos = np.array([[0.0, 0.0, 0.0]])
-        start_orn = np.array([[0.0, 0.0, np.random.uniform(-np.pi, np.pi)]])
+        start_orn = np.array([[0.0, 0.0, 0.0]])
 
         self.physics_hz = 240.0  # PyFlyt simulation runs at 240 Hz
         self.env = Aviary(
@@ -191,20 +206,27 @@ class DroneEnv(gym.Env):
         for _ in range(5):
             self.attitude_history.append(np.zeros(3, dtype=np.float32))
         
-        # Buffer to store last 4 actions (default: [-1, 0, 0, 0])
+        # Buffer to store last 4 actions
         default_action = np.array([0.0, 0.0, 0.0, -1.0], dtype=np.float32)
         self.action_history = deque(maxlen=4)
         for _ in range(4):
             self.action_history.append(default_action.copy())
+        
+        # Buffer to store last 4 sphere observations (center_x, center_y, size)
+        default_sphere = np.array([-1.0, -1.0, -1.0], dtype=np.float32)
+        self.sphere_history = deque(maxlen=4)
+        for _ in range(4):
+            self.sphere_history.append(default_sphere.copy())
         
         # Angular velocity clipping and normalization parameters per axis [roll, pitch, yaw]
         self.max_angular_velocity = np.array([20.0, 20.0, 35.0], dtype=np.float32)  # rad/s
 
         self.termination = False
         self.truncation = False
-        self.max_steps = 300
+        self.max_steps = 1000
         self.step_count = 0
-        self.flight_dome_size = 20.0
+        self.flight_dome_size = 5.0
+        self.max_height = 15.0
         self.info = {}
 
     def add_sphere(self):
@@ -241,10 +263,14 @@ class DroneEnv(gym.Env):
             height, width = rgb_image.shape[:2]
             normalized_x = (2.0 * center_x / width) - 1.0
             normalized_y = (2.0 * center_y / height) - 1.0
+            
+            # Calculate sphere size (X dimension normalized by image width to [-1, 1])
+            sphere_width = max_x - min_x
+            normalized_size = 2.0 * (sphere_width / width) - 1.0
 
-            return np.array([normalized_x, normalized_y], dtype=np.float32)
+            return np.array([normalized_x, normalized_y], dtype=np.float32), normalized_size
 
-        return np.array([-1, -1], dtype=np.float32)  # ? What should be here?
+        return np.array([-1, -1], dtype=np.float32), -1.0
 
     def add_reference_structures(self):
         """
@@ -380,25 +406,32 @@ class DroneEnv(gym.Env):
     def create_observation(self, sensors):
         attitude_data = sensors[1] / np.pi
 
-        # Get camera image and detect red sphere center
+        # Get camera image and detect red sphere center and size
         rgba_image = self.env.drones[0].rgbaImg
-        sphere_center = self.detect_red_sphere_center(rgba_image)
+        sphere_center, sphere_size = self.detect_red_sphere_center(rgba_image)
+
+        # Update sphere history with current observation (last element is most recent)
+        current_sphere = np.array([sphere_center[0], sphere_center[1], sphere_size], dtype=np.float32)
+        self.sphere_history.append(current_sphere)
 
         # Calculate angular velocity from attitude history
         angular_velocity = self.calculate_angular_velocity()
         
         # Flatten last 4 actions into a single array
         last_4_actions = np.concatenate(list(self.action_history), dtype=np.float32)
+        
+        # Flatten last 4 sphere observations into a single array (last entry is most recent)
+        last_4_sphere_obs = np.concatenate(list(self.sphere_history), dtype=np.float32)
 
         # print("angular_velocity", np.round(angular_velocity, 3))
         return np.concatenate(
-            (attitude_data, sphere_center, angular_velocity, last_4_actions),
+            (attitude_data, angular_velocity, last_4_actions, last_4_sphere_obs),
             dtype=np.float32,
         )
 
     def reset(self, seed=None, options=None):
         self.env.reset()
-        self.env.start_orn = np.array([[0.0, 0.0, np.random.uniform(-np.pi, np.pi)]])
+        self.env.start_orn = np.array([[0.0, 0.0, 0.0]])
 
         self.add_sphere()
         # self.add_reference_structures()
@@ -416,6 +449,12 @@ class DroneEnv(gym.Env):
         for _ in range(4):
             self.action_history.append(default_action.copy())
         
+        # Reset sphere history buffer
+        default_sphere = np.array([-1.0, -1.0, -1.0], dtype=np.float32)
+        self.sphere_history.clear()
+        for _ in range(4):
+            self.sphere_history.append(default_sphere.copy())
+        
         self.step_count = 0
         self.termination = False
         self.truncation = False
@@ -424,26 +463,44 @@ class DroneEnv(gym.Env):
         obs = self.create_observation(sensors)
         return obs, {}
 
-    def calculate_reward(self, obs):
-        sphere_x = obs[3]
-        sphere_y = obs[4]
-
+    def calculate_reward(self, obs, sensors):
         self.reward = 0.0
 
-        sphere_visible = not (sphere_x == -1 and sphere_y == -1)
-        if sphere_visible:
-            self.reward += 1.0
+        # Large penalty for termination due to failure conditions
+        if self.termination:
+            if self.info.get("out_of_bounds", False):
+                self.reward -= 100.0
+            if self.info.get("excessive_tilt", False):
+                self.reward -= 100.0
+            return self.reward
 
-            distance = float(np.sqrt(sphere_x ** 2 + sphere_y ** 2))
-            max_dist = np.sqrt(2.0) 
-            proximity_score = max(0.0, 1.0 - distance / max_dist)
-            self.reward += 1 * proximity_score
+        # Survival reward - encourages staying operational
+        self.reward += 0.3
+        
+        # Target position: (0, 0, 3)
+        target_position = np.array([0.0, 0.0, 5.0], dtype=np.float32)
+        current_position = sensors[3]  # Global position [x, y, z]
+        
+        # Position error (Euclidean distance from target)
+        position_error = np.linalg.norm(current_position - target_position)
+        # Reward decreases with distance, maximum reward when at target
+        self.reward += np.exp(-position_error)
+        
+        # Target orientation: (0, 0, 0) - level flight with no yaw
+        target_orientation = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+        current_orientation = sensors[1]  # Attitude [roll, pitch, yaw] in radians
+        
+        # Orientation error (sum of absolute deviations)
+        orientation_error = np.sum(np.abs(current_orientation - target_orientation))
+        self.reward += 0.7 * np.exp(-orientation_error)
 
-        roll_rad = float(obs[0])
-        pitch_rad = float(obs[1])
-        self.reward -= 1 * (abs(roll_rad) + abs(pitch_rad))
+        if len(self.action_history) >= 2:
+            last_raw_action = self.action_history[-2]
+            current_raw_action = self.action_history[-1]
+            action_diff = current_raw_action - last_raw_action
+            self.reward -= np.sum(np.square(action_diff)) * 0.05
 
-        # print(f"Reward: {self.reward}")
+        # print(f"Reward: {self.reward:.3f} | Pos Error: {position_error:.3f} | Orient Error: {orientation_error:.3f}")
         return self.reward
         
 
@@ -478,13 +535,20 @@ class DroneEnv(gym.Env):
         if self.step_count >= self.max_steps:
             self.truncation = True
 
-        if np.linalg.norm(sensors[3]) > self.flight_dome_size:
+        if abs(sensors[3][0]) > self.flight_dome_size or abs(sensors[3][1]) > self.flight_dome_size or sensors[3][2] > self.max_height:
             self.info["out_of_bounds"] = True
+            self.termination = True
+
+        # Terminate if roll or pitch exceeds 90 degrees (π/2 radians)
+        roll = attitude_data[0]
+        pitch = attitude_data[1]
+        if abs(roll) > np.pi / 2 or abs(pitch) > np.pi / 2:
+            self.info["excessive_tilt"] = True
             self.termination = True
 
         self.step_count += 1
         obs = self.create_observation(sensors)
-        reward = self.calculate_reward(obs)
+        reward = self.calculate_reward(obs, sensors)
 
         return obs, reward, self.termination, self.truncation, self.info
 
@@ -515,6 +579,11 @@ class DroneEnv(gym.Env):
                 # Apply action to drone
                 self.env.set_setpoint(0, action)
                 observation, reward, termination, truncation, info = self.step(action)
+
+                if termination:
+                    print("Termination: ", info)
+                    self.reset()
+                    continue
 
                 rgba_frame = self.env.drones[0].rgbaImg
                 
