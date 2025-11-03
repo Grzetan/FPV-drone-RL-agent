@@ -1,5 +1,5 @@
 from hover import DroneEnv
-from stable_baselines3.common.vec_env import DummyVecEnv
+from yaw import DroneEnv as YawDroneEnv
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.env_util import make_vec_env
@@ -28,7 +28,7 @@ class CheckpointCallback(BaseCallback):
         return True
 
 def make_env():
-    return DroneEnv(render=False)
+    return YawDroneEnv(render=False)
 
 if __name__ == "__main__":
     num_env = 8

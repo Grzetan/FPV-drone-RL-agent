@@ -434,7 +434,7 @@ class DroneEnv(gym.Env):
         if sphere_visible:
             self.reward += 1.0
 
-            distance = float(np.sqrt(sphere_x ** 2 + 0 ** 2)) # TODO: fix this
+            distance = float(np.sqrt(sphere_x ** 2 + sphere_y ** 2))
             max_dist = np.sqrt(2.0) 
             proximity_score = max(0.0, 1.0 - distance / max_dist)
             self.reward += 1 * proximity_score
