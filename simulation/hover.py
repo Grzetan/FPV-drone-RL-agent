@@ -190,7 +190,7 @@ class DroneEnv(gym.Env):
             physics_hz=self.physics_hz,
             drone_options={
                 "use_camera": True,
-                "camera_angle_degrees": -25,
+                "camera_angle_degrees": -30,
                 "model_dir": "./drone_models",  # Path to your drone models directory, there you can change the mass, thrust, model etc.
                 "drone_model": "cf2x",
             },
@@ -232,18 +232,27 @@ class DroneEnv(gym.Env):
         self.truncation = False
         self.max_steps = 10000
         self.step_count = 0
-        self.flight_dome_size = 5.0
-        self.max_height = 15.0
+        self.flight_dome_size = 10.0
+        self.max_height = 35.0
         self.info = {}
 
     def add_sphere(self):
+        # Generate random position: 10m away from (0,0) in XY plane, random height 10-25m
+        random_angle = random.uniform(0, 2 * np.pi)
+        x = 10.0 * np.cos(random_angle)
+        y = 10.0 * np.sin(random_angle)
+        z = random.uniform(10, 25)
+        
+        # Store sphere position for reward calculation
+        self.sphere_position = np.array([x, y, z], dtype=np.float32)
+        
         self.sphere_visual_id = self.env.createVisualShape(
             shapeType=self.env.GEOM_SPHERE, radius=1, rgbaColor=[1, 0, 0, 1]
         )
         self.sphere_id = self.env.createMultiBody(
             baseMass=0,
             baseVisualShapeIndex=self.sphere_visual_id,
-            basePosition=[10, 0, 15],
+            basePosition=[x, y, z],
         )
 
     def detect_red_sphere_center(self, rgba_image):
@@ -484,8 +493,8 @@ class DroneEnv(gym.Env):
         # Survival reward - encourages staying operational
         self.reward += 0.3
         
-        # Target position: (0, 0, 3)
-        target_position = np.array([0.0, 0.0, 5.0], dtype=np.float32)
+        # Target position: (0, 0, sphere_z - 10) - 10m below the sphere
+        target_position = np.array([0.0, 0.0, self.sphere_position[2] - 10.0], dtype=np.float32)
         current_position = sensors[3]  # Global position [x, y, z]
         
         # Position error (Euclidean distance from target)
@@ -493,8 +502,11 @@ class DroneEnv(gym.Env):
         # Reward decreases with distance, maximum reward when at target
         self.reward += np.exp(-position_error)
         
-        # Target orientation: (0, 0, 0) - level flight with no yaw
-        target_orientation = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+        # Target orientation: yaw towards sphere, pitch and roll always 0
+        # Calculate yaw angle to face the sphere from origin (0, 0)
+        target_yaw = np.arctan2(self.sphere_position[1], self.sphere_position[0])
+        
+        target_orientation = np.array([0.0, 0.0, target_yaw], dtype=np.float32)
         current_orientation = sensors[1]  # Attitude [roll, pitch, yaw] in radians
         
         # Orientation error (sum of absolute deviations)
@@ -624,7 +636,6 @@ class DroneEnv(gym.Env):
         except RuntimeError as e:
             print(f"Joystick Error: {e}")
             print("Falling back to keyboard controls...")
-            self.test_env()
         except KeyboardInterrupt:
             print("\nStopping joystick control...")
         finally:
