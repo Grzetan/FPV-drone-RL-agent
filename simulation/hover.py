@@ -142,33 +142,40 @@ class RadioMasterJoystick:
 
 
 class DroneEnv(gym.Env):
-    def __init__(self, render=False):
+    def __init__(self, render=False, history_length=8):
         super(DroneEnv, self).__init__()
+        
+        # History configuration
+        self.history_length = history_length  # Number of timesteps to track for actions and sphere observations
+        
         # [<-1, 1>: roll, <-1, 1>: pitch, <-1, 1>: yaw, <-1, 1>: throttle]
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(4,), dtype=np.float32)
 
-        # Observation space: [attitude_xyz (3), angular_velocity_xyz (3), last_4_actions (16), last_4_sphere_history (12)]
-        # Total: 3 + 3 + 16 + 12 = 34
+        # Observation space: [attitude_xyz (3), angular_velocity_xyz (3), last_N_actions (N*4), last_N_sphere_history (N*3)]
+        # Total: 3 + 3 + (N*4) + (N*3) where N = history_length
         # Angular velocity is clipped to [-20, 20] rad/s and normalized to [-1, 1]
-        # Sphere history: 4 entries of [center_x, center_y, size] each = 12 values (last entry is most recent)
-        # Structure: [x1, y1, size1, x2, y2, size2, x3, y3, size3, x4, y4, size4]
+        # Sphere history: N entries of [center_x, center_y, size] each (last entry is most recent)
         # Each center_x, center_y, size: [-1, 1]
+        action_history_size = self.history_length * 4
+        sphere_history_size = self.history_length * 3
+        total_size = 3 + 3 + action_history_size + sphere_history_size
+        
         low_bounds = np.array(
             [-1] * 3 +  # attitude
             [-1] * 3 +  # angular_velocity
-            [-1] * 16 +  # actions
-            [-1] * 12,  # sphere history: [x, y, size] × 4
+            [-1] * action_history_size +  # actions history
+            [-1] * sphere_history_size,  # sphere history
             dtype=np.float32
         )
         high_bounds = np.array(
             [1] * 3 +  # attitude
             [1] * 3 +  # angular_velocity
-            [1] * 16 +  # actions
-            [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],  # sphere history: [x, y, size] × 4
+            [1] * action_history_size +  # actions history
+            [1] * sphere_history_size,  # sphere history
             dtype=np.float32
         )
         self.observation_space = spaces.Box(
-            low=low_bounds, high=high_bounds, shape=(34,), dtype=np.float32
+            low=low_bounds, high=high_bounds, shape=(total_size,), dtype=np.float32
         )
 
         start_pos = np.array([[0.0, 0.0, 0.0]])
@@ -206,16 +213,16 @@ class DroneEnv(gym.Env):
         for _ in range(5):
             self.attitude_history.append(np.zeros(3, dtype=np.float32))
         
-        # Buffer to store last 4 actions
+        # Buffer to store last N actions
         default_action = np.array([0.0, 0.0, 0.0, -1.0], dtype=np.float32)
-        self.action_history = deque(maxlen=4)
-        for _ in range(4):
+        self.action_history = deque(maxlen=self.history_length)
+        for _ in range(self.history_length):
             self.action_history.append(default_action.copy())
         
-        # Buffer to store last 4 sphere observations (center_x, center_y, size)
+        # Buffer to store last N sphere observations (center_x, center_y, size)
         default_sphere = np.array([-1.0, -1.0, -1.0], dtype=np.float32)
-        self.sphere_history = deque(maxlen=4)
-        for _ in range(4):
+        self.sphere_history = deque(maxlen=self.history_length)
+        for _ in range(self.history_length):
             self.sphere_history.append(default_sphere.copy())
         
         # Angular velocity clipping and normalization parameters per axis [roll, pitch, yaw]
@@ -223,7 +230,7 @@ class DroneEnv(gym.Env):
 
         self.termination = False
         self.truncation = False
-        self.max_steps = 1000
+        self.max_steps = 10000
         self.step_count = 0
         self.flight_dome_size = 5.0
         self.max_height = 15.0
@@ -417,15 +424,15 @@ class DroneEnv(gym.Env):
         # Calculate angular velocity from attitude history
         angular_velocity = self.calculate_angular_velocity()
         
-        # Flatten last 4 actions into a single array
-        last_4_actions = np.concatenate(list(self.action_history), dtype=np.float32)
+        # Flatten last N actions into a single array
+        last_N_actions = np.concatenate(list(self.action_history), dtype=np.float32)
         
-        # Flatten last 4 sphere observations into a single array (last entry is most recent)
-        last_4_sphere_obs = np.concatenate(list(self.sphere_history), dtype=np.float32)
+        # Flatten last N sphere observations into a single array (last entry is most recent)
+        last_N_sphere_obs = np.concatenate(list(self.sphere_history), dtype=np.float32)
 
         # print("angular_velocity", np.round(angular_velocity, 3))
         return np.concatenate(
-            (attitude_data, angular_velocity, last_4_actions, last_4_sphere_obs),
+            (attitude_data, angular_velocity, last_N_actions, last_N_sphere_obs),
             dtype=np.float32,
         )
 
@@ -446,13 +453,13 @@ class DroneEnv(gym.Env):
         # Reset action history buffer
         default_action = np.array([0.0, 0.0, 0.0, -1.0], dtype=np.float32)
         self.action_history.clear()
-        for _ in range(4):
+        for _ in range(self.history_length):
             self.action_history.append(default_action.copy())
         
         # Reset sphere history buffer
         default_sphere = np.array([-1.0, -1.0, -1.0], dtype=np.float32)
         self.sphere_history.clear()
-        for _ in range(4):
+        for _ in range(self.history_length):
             self.sphere_history.append(default_sphere.copy())
         
         self.step_count = 0
