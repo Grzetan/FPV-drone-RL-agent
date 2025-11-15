@@ -42,7 +42,7 @@ if __name__ == "__main__":
     env = make_vec_env(make_env, n_envs=num_env, vec_env_cls=SubprocVecEnv)
     env = VecNormalize(env, norm_obs=True, norm_reward=True)
 
-    checkpoint_callback = CheckpointCallback(save_path="./ppo_hover_checkpoint2/", name_prefix="ppo_hover", verbose=1)
+    checkpoint_callback = CheckpointCallback(save_path="./ppo_hover_checkpoint3/", name_prefix="ppo_hover", verbose=1)
 
     model = SAC(
         policy="MlpPolicy",

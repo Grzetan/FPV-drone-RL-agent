@@ -1,2 +1,2 @@
 To view tensorboard:
-tensorboard --logdir logs
+tensorboard --logdir tensorboard

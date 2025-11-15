@@ -4,10 +4,10 @@ from yaw import DroneEnv as YawDroneEnv
 from stable_baselines3.common.vec_env import VecNormalize, DummyVecEnv
 
 env = DummyVecEnv([lambda: DroneEnv(render=True)])
-vec_env = VecNormalize.load("ppo_hover_checkpoint2/ppo_hover_960000_steps_None_lenNone_rewNone.pkl", venv=env)
+vec_env = VecNormalize.load("ppo_hover_checkpoint2/ppo_hover_500000_steps_None_lenNone_rewNone.pkl", venv=env)
 vec_env.training = False
 vec_env.norm_reward = False
-model = SAC.load("ppo_hover_checkpoint2/ppo_hover_960000_steps_None_lenNone_rewNone.zip", env=vec_env)
+model = SAC.load("ppo_hover_checkpoint2/ppo_hover_500000_steps_None_lenNone_rewNone.zip", env=vec_env)
 
 
 obs = vec_env.reset()

@@ -512,12 +512,18 @@ class DroneEnv(gym.Env):
         # Orientation error (sum of absolute deviations)
         orientation_error = np.sum(np.abs(current_orientation - target_orientation))
         self.reward += 0.7 * np.exp(-orientation_error)
+        
+        # Bonus for visible sphere
+        sphere_center_x = obs[-3]
+        sphere_size = obs[-1]
+        if sphere_center_x > -1.0 or sphere_size > -1.0:
+            self.reward += 1.0
 
-        if len(self.action_history) >= 2:
-            last_raw_action = self.action_history[-2]
-            current_raw_action = self.action_history[-1]
-            action_diff = current_raw_action - last_raw_action
-            self.reward -= np.sum(np.square(action_diff)) * 0.05
+        # if len(self.action_history) >= 2:
+        #     last_raw_action = self.action_history[-2]
+        #     current_raw_action = self.action_history[-1]
+        #     action_diff = current_raw_action - last_raw_action
+        #     self.reward -= np.sum(np.square(action_diff)) * 0.05
 
         # print(f"Reward: {self.reward:.3f} | Pos Error: {position_error:.3f} | Orient Error: {orientation_error:.3f}")
         return self.reward
