@@ -229,8 +229,8 @@ class DroneEnv(gym.Env):
         self.max_angular_velocity = np.array([20.0, 20.0, 35.0], dtype=np.float32)  # rad/s
 
         self.termination = False
-        self.truncation = False
-        self.max_steps = 10000
+        self.truncation =False
+        self.max_steps = 2000
         self.step_count = 0
         self.flight_dome_size = 10.0
         self.max_height = 35.0
@@ -241,7 +241,7 @@ class DroneEnv(gym.Env):
         random_angle = random.uniform(0, 2 * np.pi)
         x = 10.0 * np.cos(random_angle)
         y = 10.0 * np.sin(random_angle)
-        z = random.uniform(10, 25)
+        z = random.uniform(25, 25)
         
         # Store sphere position for reward calculation
         self.sphere_position = np.array([x, y, z], dtype=np.float32)
@@ -500,24 +500,29 @@ class DroneEnv(gym.Env):
         # Position error (Euclidean distance from target)
         position_error = np.linalg.norm(current_position - target_position)
         # Reward decreases with distance, maximum reward when at target
-        self.reward += np.exp(-position_error)
-        
-        # Target orientation: yaw towards sphere, pitch and roll always 0
-        # Calculate yaw angle to face the sphere from origin (0, 0)
-        target_yaw = np.arctan2(self.sphere_position[1], self.sphere_position[0])
-        
-        target_orientation = np.array([0.0, 0.0, target_yaw], dtype=np.float32)
-        current_orientation = sensors[1]  # Attitude [roll, pitch, yaw] in radians
-        
-        # Orientation error (sum of absolute deviations)
-        orientation_error = np.sum(np.abs(current_orientation - target_orientation))
-        self.reward += 0.7 * np.exp(-orientation_error)
+        position_reward = np.exp(-position_error / 4.0)
+        # print(f"Position reward: {position_reward:.3f}")
+        self.reward += position_reward
         
         # Bonus for visible sphere
         sphere_center_x = obs[-3]
         sphere_size = obs[-1]
         if sphere_center_x > -1.0 or sphere_size > -1.0:
+            # print(f"Sphere visible reward: 1.0")
             self.reward += 1.0
+
+            # Target orientation: yaw towards sphere, pitch and roll always 0
+            # Calculate yaw angle to face the sphere from origin (0, 0)
+            target_yaw = np.arctan2(self.sphere_position[1], self.sphere_position[0])
+            
+            target_orientation = np.array([0.0, 0.0, target_yaw], dtype=np.float32)
+            current_orientation = sensors[1]  # Attitude [roll, pitch, yaw] in radians
+            
+            # Orientation error (sum of absolute deviations)
+            orientation_error = np.sum(np.abs(current_orientation - target_orientation))
+            orientation_reward = np.exp(-orientation_error* 2)
+            # print(f"Orientation reward: {orientation_reward:.3f}")
+            self.reward += orientation_reward
 
         # if len(self.action_history) >= 2:
         #     last_raw_action = self.action_history[-2]
@@ -567,7 +572,7 @@ class DroneEnv(gym.Env):
         # Terminate if roll or pitch exceeds 90 degrees (π/2 radians)
         roll = attitude_data[0]
         pitch = attitude_data[1]
-        if abs(roll) > np.pi / 2 or abs(pitch) > np.pi / 2:
+        if abs(roll) > np.pi / 3 or abs(pitch) > np.pi / 3:
             self.info["excessive_tilt"] = True
             self.termination = True
 
@@ -613,11 +618,10 @@ class DroneEnv(gym.Env):
                 rgba_frame = self.env.drones[0].rgbaImg
                 
                 # Print status every 10 iterations
-                if iteration % 10 == 0:
+                if iteration % 1 == 0:
                     print(f"Iteration {iteration}")
-                    print(action)
-                    print(f"  Attitude [x,y,z]: [{np.degrees(observation[0]):.3f}°, "
-                          f"{np.degrees(observation[1]):.3f}°, {np.degrees(observation[2]):.3f}°]")
+                    print(f"  Reward: {reward:.3f}")
+                    print(f"  Attitude [x,y,z]: [{observation[0]:.3f}, {observation[1]:.3f}, {observation[2]:.3f}]")
                     print(f"  Sphere center [x,y]: [{observation[3]:.3f}, {observation[4]:.3f}]")
                     print("-" * 50)
                 
@@ -636,7 +640,8 @@ class DroneEnv(gym.Env):
                     print("Environment reset complete!")
                     print("-" * 50)
                     continue
-                
+                input()
+
                 iteration += 1
                 
         except RuntimeError as e:

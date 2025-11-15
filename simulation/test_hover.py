@@ -4,18 +4,20 @@ from yaw import DroneEnv as YawDroneEnv
 from stable_baselines3.common.vec_env import VecNormalize, DummyVecEnv
 
 env = DummyVecEnv([lambda: DroneEnv(render=True)])
-vec_env = VecNormalize.load("ppo_hover_checkpoint2/ppo_hover_500000_steps_None_lenNone_rewNone.pkl", venv=env)
+vec_env = VecNormalize.load("./find_the_sphere_and_move_back_and_stay_ground/ppo_hover_920000_steps_None_lenNone_rewNone.pkl", venv=env)
 vec_env.training = False
 vec_env.norm_reward = False
-model = SAC.load("ppo_hover_checkpoint2/ppo_hover_500000_steps_None_lenNone_rewNone.zip", env=vec_env)
+model = SAC.load("./find_the_sphere_and_move_back_and_stay_ground/ppo_hover_920000_steps_None_lenNone_rewNone.zip", env=vec_env)
 
 
 obs = vec_env.reset()
-for _ in range(1000):
+for _ in range(2000):
     action, _ = model.predict(obs, deterministic=True)
     print(action)
     # input()
     obs, reward, done, info = vec_env.step(action)
+    # print(obs)
+    # print(f"Velocity: {obs[3:6]}")
     if done[0]:
         obs = vec_env.reset()
         print("Episode finished, resetting...")
