@@ -190,13 +190,14 @@ class DroneEnv(gym.Env):
             physics_hz=self.physics_hz,
             drone_options={
                 "use_camera": True,
-                "camera_angle_degrees": -30,
+                "camera_angle_degrees": -25,
+                "camera_resolution": (128, 128),  # Width x Height in pixels (default is usually 128x128)
                 "model_dir": "./drone_models",  # Path to your drone models directory, there you can change the mass, thrust, model etc.
                 "drone_model": "cf2x",
             },
         )
 
-        self.add_sphere()
+        self.add_reference_object()
         # self.add_reference_structures()
 
         self.env.set_mode(0)
@@ -236,23 +237,45 @@ class DroneEnv(gym.Env):
         self.max_height = 35.0
         self.info = {}
 
-    def add_sphere(self):
+    def add_reference_object(self):
         # Generate random position: 10m away from (0,0) in XY plane, random height 10-25m
         random_angle = random.uniform(0, 2 * np.pi)
-        x = 10.0 * np.cos(random_angle)
-        y = 10.0 * np.sin(random_angle)
-        z = random.uniform(25, 25)
+        x = 6.0 * np.cos(random_angle)
+        y = 6.0 * np.sin(random_angle)
+        z = 0#random.uniform(5, 12)
         
-        # Store sphere position for reward calculation
+        # Store cube position for reward calculation
         self.sphere_position = np.array([x, y, z], dtype=np.float32)
         
-        self.sphere_visual_id = self.env.createVisualShape(
-            shapeType=self.env.GEOM_SPHERE, radius=1, rgbaColor=[1, 0, 0, 1]
+        # Create a green cube with one red face
+        cube_size = 2.0  # 2m cube
+        
+        # Create a thin red face (a flat box) on the front face
+        # The red face is placed on the +X face of the cube (forward direction)
+        red_face_visual_id = self.env.createVisualShape(
+            shapeType=self.env.GEOM_BOX,
+            halfExtents=[0.02, cube_size/2 + 0.01, cube_size/2 + 0.01],  # Thin red panel (thin in X)
+            rgbaColor=[1, 0, 0, 1],  # Red
+            visualFramePosition=[cube_size/2, 0, 0]  # Position it on the +X face of cube
         )
-        self.sphere_id = self.env.createMultiBody(
+        
+        # Calculate yaw rotation to face origin (only Z-axis rotation)
+        # The red face is on the +X local face, so we need to rotate so that +X points toward origin
+        yaw_to_origin = np.arctan2(-y, -x)  # Angle from cube position to origin in XY plane
+        yaw_rotation = yaw_to_origin
+        
+        # Create orientation quaternion with only yaw rotation (roll=0, pitch=0)
+        # Quaternion for rotation around Z axis: [x, y, z, w] = [0, 0, sin(yaw/2), cos(yaw/2)]
+        quat_z = np.sin(yaw_rotation / 2)
+        quat_w = np.cos(yaw_rotation / 2)
+        orientation = [0, 0, quat_z, quat_w]
+        
+        # Create the red face as a separate body at the same position with same orientation
+        self.red_face_id = self.env.createMultiBody(
             baseMass=0,
-            baseVisualShapeIndex=self.sphere_visual_id,
+            baseVisualShapeIndex=red_face_visual_id,
             basePosition=[x, y, z],
+            baseOrientation=orientation
         )
 
     def detect_red_sphere_center(self, rgba_image):
@@ -449,7 +472,7 @@ class DroneEnv(gym.Env):
         self.env.reset()
         self.env.start_orn = np.array([[0.0, 0.0, 0.0]])
 
-        self.add_sphere()
+        self.add_reference_object()
         # self.add_reference_structures()
         sensors = self.env.state(0)
         self.action = np.array([0.0, 0.0, 0.0, -1.0], dtype=np.float32)
@@ -640,7 +663,6 @@ class DroneEnv(gym.Env):
                     print("Environment reset complete!")
                     print("-" * 50)
                     continue
-                input()
 
                 iteration += 1
                 
