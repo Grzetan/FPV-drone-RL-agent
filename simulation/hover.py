@@ -191,6 +191,7 @@ class DroneEnv(gym.Env):
             drone_options={
                 "use_camera": True,
                 "camera_angle_degrees": -25,
+                "camera_FOV_degrees": 90,
                 "camera_resolution": (128, 128),  # Width x Height in pixels (default is usually 128x128)
                 "model_dir": "./drone_models",  # Path to your drone models directory, there you can change the mass, thrust, model etc.
                 "drone_model": "cf2x",
@@ -242,7 +243,7 @@ class DroneEnv(gym.Env):
         random_angle = random.uniform(0, 2 * np.pi)
         x = 6.0 * np.cos(random_angle)
         y = 6.0 * np.sin(random_angle)
-        z = 0#random.uniform(5, 12)
+        z = 3#random.uniform(5, 12)
         
         # Store cube position for reward calculation
         self.sphere_position = np.array([x, y, z], dtype=np.float32)
@@ -648,8 +649,34 @@ class DroneEnv(gym.Env):
                     print(f"  Sphere center [x,y]: [{observation[3]:.3f}, {observation[4]:.3f}]")
                     print("-" * 50)
                 
-                # Display camera view
+
+                rgb_image = rgba_frame[:, :, :3].astype(np.uint8)
                 frame = cv2.cvtColor(rgba_frame.astype(np.uint8), cv2.COLOR_RGBA2BGR)
+                
+                red_mask = (
+                    (rgb_image[:, :, 0] > 100) &  # Red channel > 100
+                    (rgb_image[:, :, 1] == 0) &   # Green channel == 0
+                    (rgb_image[:, :, 2] == 0)     # Blue channel == 0
+                ).astype(np.uint8) * 255
+
+                red_at_edges = (
+                    np.any(red_mask[0, :] > 0) or      # Top edge
+                    np.any(red_mask[-1, :] > 0) or     # Bottom edge
+                    np.any(red_mask[:, 0] > 0) or      # Left edge
+                    np.any(red_mask[:, -1] > 0)        # Right edge
+                )
+
+                contours, _ = cv2.findContours(red_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                if contours and not red_at_edges:
+                    contour = max(contours, key=cv2.contourArea)
+                    epsilon = 0.02 * cv2.arcLength(contour, True)
+                    approx = cv2.approxPolyDP(contour, epsilon, True)
+
+                    if len(approx) == 4:
+                        corners = approx.reshape((4,2))
+                        for (x, y) in corners:
+                            cv2.circle(frame, (int(x), int(y)), 1, (0,255,0), -1)  # Green circles
+                        cv2.polylines(frame, [corners], isClosed=True, color=(0,255,0), thickness=1)
                 cv2.imshow("RadioMaster Pocket Control", frame)
                 
                 # Check for keyboard input
