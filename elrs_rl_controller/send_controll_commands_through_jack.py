@@ -1,124 +1,153 @@
 import numpy as np
 import sounddevice as sd
 import time
+import threading
 
 TOTAL_CHANNELS = 8
 FRAME_LENGTH_MS = 22.5
 SEPARATOR_PULSE_US = 300
-
-# To do konfiguracji
-channel_values_us = [
-    1500,  # CH1: Roll (Aileron)   - 0%
-    1500,  # CH2: Pitch (Elevator) - 0%
-    1000,  # CH3: Throttle        - 0% (Minimum)
-    2000,  # CH4: Yaw (Rudder)     - 100%
-    1500,  # CH5: Aux 1          - 0%
-    1500,  # CH6: Aux 2          - 0%
-    1500,  # CH7: Aux 3          - 0%
-    1500,  # CH8: Aux 4          - 0%
-]
-
 SAMPLE_RATE = 48000
 AMPLITUDE = 0.8
+INVERT_POLARITY = False
 
+channel_values_us = [1500] * TOTAL_CHANNELS
 
 ppm_frame_wave = None
-
+position = 0
+lock = threading.Lock()
 
 def generate_ppm_frame():
-    """Generates one complete PPM frame as a square wave."""
     global ppm_frame_wave
-
+    
     frame_parts = []
     total_frame_time_us = 0
-
-    # Convert timings from microseconds (us) to number of samples
+    
     us_to_samples = lambda us: int(us * SAMPLE_RATE / 1_000_000)
+    
+    if INVERT_POLARITY:
+        lvl_pulse = -AMPLITUDE
+        lvl_wait  = AMPLITUDE
+    else:
+        lvl_pulse = AMPLITUDE
+        lvl_wait  = -AMPLITUDE
 
-    separator_samples = us_to_samples(SEPARATOR_PULSE_US)
-    low_pulse = np.full(separator_samples, -AMPLITUDE, dtype=np.float32)
+    sep_samples = us_to_samples(SEPARATOR_PULSE_US)
+    pulse_wave = np.full(sep_samples, lvl_pulse, dtype=np.float32)
 
-    # Generate pulses for each channel
     for i in range(TOTAL_CHANNELS):
-        value_us = channel_values_us[i]
+        val = np.clip(channel_values_us[i], 700, 2300)
+        
+        wait_time_us = val - SEPARATOR_PULSE_US
+        wait_samples = us_to_samples(wait_time_us)
+        wait_wave = np.full(wait_samples, lvl_wait, dtype=np.float32)
+        
+        frame_parts.append(pulse_wave)
+        frame_parts.append(wait_wave)
+        
+        total_frame_time_us += val
 
-        # Ensure channel values are within a safe range
-        value_us = np.clip(value_us, 900, 2100)
+    frame_parts.append(pulse_wave)
+    total_frame_time_us += SEPARATOR_PULSE_US
+    
+    frame_len_us = FRAME_LENGTH_MS * 1000
+    sync_gap_us = frame_len_us - total_frame_time_us
+    
+    if sync_gap_us < 3000:
+        sync_gap_us = 4000 
+        
+    sync_samples = us_to_samples(sync_gap_us)
+    sync_wave = np.full(sync_samples, lvl_wait, dtype=np.float32)
+    
+    frame_parts.append(sync_wave)
 
-        channel_samples = us_to_samples(value_us)
-        high_pulse = np.full(channel_samples, AMPLITUDE, dtype=np.float32)
+    new_wave = np.concatenate(frame_parts).reshape(-1, 1)
 
-        frame_parts.append(high_pulse)
-        frame_parts.append(low_pulse)
+    with lock:
+        ppm_frame_wave = new_wave
 
-        total_frame_time_us += value_us + SEPARATOR_PULSE_US
-
-    # Calculate the sync gap to fill the rest of the frame
-    frame_length_us = FRAME_LENGTH_MS * 1000
-    sync_gap_us = frame_length_us - total_frame_time_us
-
-    if sync_gap_us < 0:
-        print("Error: Channel pulse widths exceed total frame length!")
-        sync_gap_us = 0
-
-    sync_gap_samples = us_to_samples(sync_gap_us)
-    sync_pulse = np.full(sync_gap_samples, -AMPLITUDE, dtype=np.float32)
-    frame_parts.append(sync_pulse)
-
-    # Combine all parts into a single array
-    ppm_frame_wave = np.concatenate(frame_parts)
-    print("PPM frame generated successfully.")
-    print(f"Total frame duration: {len(ppm_frame_wave) / SAMPLE_RATE * 1000:.2f} ms")
-
-
-# This callback function is called by the sounddevice library to get more audio data
-position = 0
-
-
-def audio_callback(outdata, frames, time, status):
-    global position
+def audio_callback(outdata, frames, time_info, status):
+    global position, ppm_frame_wave
     if status:
         print(status)
 
-    chunk_size = len(outdata)
-    remaining_in_frame = len(ppm_frame_wave) - position
+    with lock:
+        if ppm_frame_wave is None:
+            outdata.fill(0)
+            return
 
-    if remaining_in_frame >= chunk_size:
-        # We can copy a full chunk from the current frame
-        outdata[:] = ppm_frame_wave[position : position + chunk_size].reshape(-1, 1)
-        position += chunk_size
-    else:
-        # We've reached the end of the frame, need to loop back
-        part1 = ppm_frame_wave[position:]
-        part2_size = chunk_size - len(part1)
-        part2 = ppm_frame_wave[:part2_size]
+        chunk_size = len(outdata)
+        wave_len = len(ppm_frame_wave)
+        
+        if position >= wave_len:
+            position %= wave_len
 
-        outdata[:] = np.concatenate((part1, part2)).reshape(-1, 1)
-        position = part2_size
+        end_pos = position + chunk_size
+        
+        if end_pos <= wave_len:
+            outdata[:] = ppm_frame_wave[position:end_pos]
+            position += chunk_size
+        else:
+            part1_len = wave_len - position
+            outdata[:part1_len] = ppm_frame_wave[position:]
+            
+            part2_len = chunk_size - part1_len
+            outdata[part1_len:] = ppm_frame_wave[:part2_len]
+            
+            position = part2_len
+            
+        if position >= wave_len:
+            position = 0
 
-
-# --- Main Program ---
 if __name__ == "__main__":
-    print("Generating PPM waveform...")
     generate_ppm_frame()
-
+    
     print("\n--- Starting PPM Signal Generation ---")
     print("Connect your PC's audio output to the radio's trainer port.")
     print("Ensure your radio is in 'Master / Jack' trainer mode.")
     print("Verify signals on the radio's channel monitor before connecting a model.")
     print("\nPress Ctrl+C to stop the signal.")
-
+    print("--------------------------------------\n")
+    
     try:
-        # Create and start the audio stream
-        with sd.OutputStream(
-            channels=1, samplerate=SAMPLE_RATE, callback=audio_callback
-        ):
+        with sd.OutputStream(channels=1, samplerate=SAMPLE_RATE, callback=audio_callback):
+            
+            print("Calibrate input signals on radio:")
+            print("SYS -> TRAINER -> Long press 'Cal'")
+            print("If you have done this, press Enter...")
+            input("")
+            print("Starting simulation...")
+            
+            current_channel_index = 0
+            direction = 20
+            min_val, max_val = 900, 2100
+            
             while True:
-                # The callback runs in the background, just keep the script alive
-                time.sleep(1)
-
+                # Zresetuj nieaktywne kanały do wartości środkowej
+                for i in range(4):
+                    if i != current_channel_index:
+                        channel_values_us[i] = 1500
+                
+                # Zaktualizuj wartość aktywnego kanału
+                channel_values_us[current_channel_index] += direction
+                
+                # Sprawdź granice i zmień kierunek lub kanał
+                if channel_values_us[current_channel_index] >= max_val:
+                    channel_values_us[current_channel_index] = max_val
+                    direction = -20
+                elif channel_values_us[current_channel_index] <= min_val:
+                    channel_values_us[current_channel_index] = min_val
+                    direction = 20
+                    # Koniec pełnego cyklu (góra-dół), przejdź do następnego kanału
+                    channel_values_us[current_channel_index] = 1500 # Zresetuj stary kanał
+                    current_channel_index = (current_channel_index + 1) % 4
+                
+                generate_ppm_frame()
+                
+                print(f"Testing CH{current_channel_index + 1}: {channel_values_us[current_channel_index]:4d}us", end='     \r')
+                
+                time.sleep(0.05)
+                
     except KeyboardInterrupt:
-        print("\nStopping PPM signal.")
+        print("\nStopped.")
     except Exception as e:
-        print(f"\nAn error occurred: {e}")
-        print("Please ensure you have a valid audio output device.")
+        print(f"\nError: {e}")
