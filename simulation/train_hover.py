@@ -49,10 +49,12 @@ if __name__ == "__main__":
         env=env,
         verbose=1,
         tensorboard_log="./tensorboard",
-        n_steps=2048,
+        buffer_size=200_000,      # Size of the replay buffer (e.g., 200k transitions)
+        train_freq=(1, "step"),   # Train the model after each step in the environment
+        gradient_steps=1,         # How many gradient updates to perform after each train_freq
         batch_size=256,
         learning_rate=0.0003,
-        policy_kwargs=dict(net_arch=[128, 128])
+        policy_kwargs=dict(net_arch=[512, 512])
     )
 
     model.learn(total_timesteps=2_000_000, callback=checkpoint_callback)

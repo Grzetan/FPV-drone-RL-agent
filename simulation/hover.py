@@ -151,27 +151,30 @@ class DroneEnv(gym.Env):
         # [<-1, 1>: roll, <-1, 1>: pitch, <-1, 1>: yaw, <-1, 1>: throttle]
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(4,), dtype=np.float32)
 
-        # Observation space: [attitude_xyz (3), angular_velocity_xyz (3), last_N_actions (N*4), last_N_sphere_history (N*3)]
-        # Total: 3 + 3 + (N*4) + (N*3) where N = history_length
+        # Observation space: [attitude_xyz (3), angular_velocity_xyz (3), linear_velocity_xyz (3), last_N_actions (N*4), last_N_global_positions (N*3)]
+        # Total: 3 + 3 + 3 + (N*4) + (N*3) where N = history_length
         # Angular velocity is clipped to [-20, 20] rad/s and normalized to [-1, 1]
-        # Sphere history: N entries of [center_x, center_y, size] each (last entry is most recent)
-        # Each center_x, center_y, size: [-1, 1]
+        # Global positions: N entries of [x, y, z] each (last entry is most recent)
+        # Position values will be normalized based on flight_dome_size and max_height
         action_history_size = self.history_length * 4
-        sphere_history_size = self.history_length * 3
-        total_size = 3 + 3 + action_history_size + sphere_history_size
+        global_position_history_size = self.history_length * 3  # x, y, z for each timestep
+        total_size = 3 + 3 + 3 + action_history_size + global_position_history_size
         
+        # Define bounds (will normalize positions to roughly [-1, 1] range)
         low_bounds = np.array(
             [-1] * 3 +  # attitude
             [-1] * 3 +  # angular_velocity
+            [-1] * 3 +  # linear_velocity
             [-1] * action_history_size +  # actions history
-            [-1] * sphere_history_size,  # sphere history
+            [-1] * global_position_history_size,  # global position history (allow some overflow)
             dtype=np.float32
         )
         high_bounds = np.array(
             [1] * 3 +  # attitude
             [1] * 3 +  # angular_velocity
+            [1] * 3 +  # linear_velocity
             [1] * action_history_size +  # actions history
-            [1] * sphere_history_size,  # sphere history
+            [1] * global_position_history_size,  # global position history (allow some overflow)
             dtype=np.float32
         )
         self.observation_space = spaces.Box(
@@ -221,11 +224,11 @@ class DroneEnv(gym.Env):
         for _ in range(self.history_length):
             self.action_history.append(default_action.copy())
         
-        # Buffer to store last N sphere observations (center_x, center_y, size)
-        default_sphere = np.array([-1.0, -1.0, -1.0], dtype=np.float32)
-        self.sphere_history = deque(maxlen=self.history_length)
+        # Buffer to store last N global position observations (x, y, z)
+        default_global_position = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+        self.global_position_history = deque(maxlen=self.history_length)
         for _ in range(self.history_length):
-            self.sphere_history.append(default_sphere.copy())
+            self.global_position_history.append(default_global_position.copy())
         
         # Angular velocity clipping and normalization parameters per axis [roll, pitch, yaw]
         self.max_angular_velocity = np.array([20.0, 20.0, 35.0], dtype=np.float32)  # rad/s
@@ -235,7 +238,13 @@ class DroneEnv(gym.Env):
         self.max_steps = 2000
         self.step_count = 0
         self.flight_dome_size = 10.0
-        self.max_height = 35.0
+        self.max_height = 10.0
+        
+        # Normalization parameters for global position
+        # Will normalize x, y to [-1, 1] based on flight_dome_size
+        # Will normalize z to [0, 1] based on max_height
+        self.position_normalization = np.array([self.flight_dome_size, self.flight_dome_size, self.max_height], dtype=np.float32)
+        
         self.info = {}
 
     def add_reference_object(self):
@@ -243,10 +252,10 @@ class DroneEnv(gym.Env):
         random_angle = random.uniform(0, 2 * np.pi)
         x = 6.0 * np.cos(random_angle)
         y = 6.0 * np.sin(random_angle)
-        z = 3#random.uniform(5, 12)
+        z = random.uniform(4, 12)
         
-        # Store cube position for reward calculation
-        self.sphere_position = np.array([x, y, z], dtype=np.float32)
+        # Store the position for reward calculation
+        self.reference_object_position = np.array([x, y, z], dtype=np.float32)
         
         # Create a green cube with one red face
         cube_size = 2.0  # 2m cube
@@ -279,38 +288,57 @@ class DroneEnv(gym.Env):
             baseOrientation=orientation
         )
 
-    def detect_red_sphere_center(self, rgba_image):
-        rgb_image = rgba_image[:, :, :3]
-        red_channel = rgb_image[:, :, 0].astype(np.float32)
-        green_channel = rgb_image[:, :, 1].astype(np.float32)
-        blue_channel = rgb_image[:, :, 2].astype(np.float32)
-
-        mask = (
-            (red_channel >= 3 * green_channel)
-            & (red_channel >= 3 * blue_channel)
-            & (red_channel > 50)
+    def calculate_drone_position(self, rgba_image):
+        # Default values when no rectangle is detected - all corners at -1.0
+        # Format: [c1_x, c1_y, c2_x, c2_y, c3_x, c3_y, c4_x, c4_y]
+        default_corners = np.array([-1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0], dtype=np.float32)
+        
+        # Get image dimensions (128x128 as configured)
+        img_height, img_width = rgba_image.shape[:2]
+        
+        red_mask = (
+            (rgba_image[:, :, 0] > 100) &  # Red channel > 100
+            (rgba_image[:, :, 1] == 0) &   # Green channel == 0
+            (rgba_image[:, :, 2] == 0)     # Blue channel == 0
         ).astype(np.uint8) * 255
 
-        red_pixels = np.where(mask > 0)
+        red_at_edges = (
+            np.any(red_mask[0, :] > 0) or      # Top edge
+            np.any(red_mask[-1, :] > 0) or     # Bottom edge
+            np.any(red_mask[:, 0] > 0) or      # Left edge
+            np.any(red_mask[:, -1] > 0)        # Right edge
+        )
 
-        if len(red_pixels[0]) > 0:
-            min_y, max_y = np.min(red_pixels[0]), np.max(red_pixels[0])
-            min_x, max_x = np.min(red_pixels[1]), np.max(red_pixels[1])
+        # frame = cv2.cvtColor(rgba_image.astype(np.uint8), cv2.COLOR_RGBA2BGR)
 
-            center_x = (min_x + max_x) / 2.0
-            center_y = (min_y + max_y) / 2.0
+        contours, _ = cv2.findContours(red_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if contours and not red_at_edges:
+            contour = max(contours, key=cv2.contourArea)
+            epsilon = 0.04 * cv2.arcLength(contour, True)
+            approx = cv2.approxPolyDP(contour, epsilon, True)
 
-            height, width = rgb_image.shape[:2]
-            normalized_x = (2.0 * center_x / width) - 1.0
-            normalized_y = (2.0 * center_y / height) - 1.0
-            
-            # Calculate sphere size (X dimension normalized by image width to [-1, 1])
-            sphere_width = max_x - min_x
-            normalized_size = 2.0 * (sphere_width / width) - 1.0
+            # print("Approx length: ", len(approx))
+            if len(approx) == 4:
+                corners = approx.reshape((4, 2))
+                
+                # for (x, y) in corners:
+                #     cv2.circle(frame, (int(x), int(y)), 1, (0,255,0), -1)  # Green circles
+                #     cv2.polylines(frame, [corners], isClosed=True, color=(0,255,0), thickness=1)
 
-            return np.array([normalized_x, normalized_y], dtype=np.float32), normalized_size
+                # Normalize all 4 corners to [-1, 1] range
+                normalized_corners = np.zeros(8, dtype=np.float32)
+                for i in range(4):
+                    # X: left edge (0) -> -1, right edge (img_width) -> 1
+                    normalized_corners[i*2] = (corners[i, 0] / (img_width / 2.0)) - 1.0
+                    # Y: top edge (0) -> -1, bottom edge (img_height) -> 1
+                    normalized_corners[i*2 + 1] = (corners[i, 1] / (img_height / 2.0)) - 1.0
+                
+                # cv2.imshow("Rectangle Corners", frame)
+                return normalized_corners
 
-        return np.array([-1, -1], dtype=np.float32), -1.0
+        # print("No rectangle found")
+        # cv2.imshow("Rectangle Corners", frame)
+        return default_corners
 
     def add_reference_structures(self):
         """
@@ -446,26 +474,30 @@ class DroneEnv(gym.Env):
     def create_observation(self, sensors):
         attitude_data = sensors[1] / np.pi
 
-        # Get camera image and detect red sphere center and size
-        rgba_image = self.env.drones[0].rgbaImg
-        sphere_center, sphere_size = self.detect_red_sphere_center(rgba_image)
-
-        # Update sphere history with current observation (last element is most recent)
-        current_sphere = np.array([sphere_center[0], sphere_center[1], sphere_size], dtype=np.float32)
-        self.sphere_history.append(current_sphere)
+        # Get current global position and normalize it
+        current_position = sensors[3]  # Global position [x, y, z]
+        normalized_position = current_position / self.position_normalization
+        
+        # Update global position history with current observation (last element is most recent)
+        self.global_position_history.append(normalized_position.copy())
 
         # Calculate angular velocity from attitude history
         angular_velocity = self.calculate_angular_velocity()
         
+        # Get linear velocity
+        linear_velocity = sensors[2]
+        # Normalize linear velocity (assuming max speed ~20 m/s for normalization)
+        normalized_linear_velocity = np.clip(linear_velocity / 20.0, -1.0, 1.0)
+
         # Flatten last N actions into a single array
         last_N_actions = np.concatenate(list(self.action_history), dtype=np.float32)
         
-        # Flatten last N sphere observations into a single array (last entry is most recent)
-        last_N_sphere_obs = np.concatenate(list(self.sphere_history), dtype=np.float32)
+        # Flatten last N global position observations into a single array (last entry is most recent)
+        last_N_global_positions = np.concatenate(list(self.global_position_history), dtype=np.float32)
 
         # print("angular_velocity", np.round(angular_velocity, 3))
         return np.concatenate(
-            (attitude_data, angular_velocity, last_N_actions, last_N_sphere_obs),
+            (attitude_data, angular_velocity, normalized_linear_velocity, last_N_actions, last_N_global_positions),
             dtype=np.float32,
         )
 
@@ -489,11 +521,11 @@ class DroneEnv(gym.Env):
         for _ in range(self.history_length):
             self.action_history.append(default_action.copy())
         
-        # Reset sphere history buffer
-        default_sphere = np.array([-1.0, -1.0, -1.0], dtype=np.float32)
-        self.sphere_history.clear()
+        # Reset global position history buffer
+        default_global_position = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+        self.global_position_history.clear()
         for _ in range(self.history_length):
-            self.sphere_history.append(default_sphere.copy())
+            self.global_position_history.append(default_global_position.copy())
         
         self.step_count = 0
         self.termination = False
@@ -517,9 +549,15 @@ class DroneEnv(gym.Env):
         # Survival reward - encourages staying operational
         self.reward += 0.3
         
-        # Target position: (0, 0, sphere_z - 10) - 10m below the sphere
-        target_position = np.array([0.0, 0.0, self.sphere_position[2] - 10.0], dtype=np.float32)
+        # Get current position
         current_position = sensors[3]  # Global position [x, y, z]
+        
+        # Penalty for being on the ground (Z position at or near 0)
+        if current_position[2] <= 0.1:  # Z position is at ground level
+            self.reward -= 2.0
+        
+        # Target position: (0, 0, sphere_z - 10) - 10m below the sphere
+        target_position = np.array([0.0, 0.0, 5.0], dtype=np.float32)
         
         # Position error (Euclidean distance from target)
         position_error = np.linalg.norm(current_position - target_position)
@@ -528,25 +566,18 @@ class DroneEnv(gym.Env):
         # print(f"Position reward: {position_reward:.3f}")
         self.reward += position_reward
         
-        # Bonus for visible sphere
-        sphere_center_x = obs[-3]
-        sphere_size = obs[-1]
-        if sphere_center_x > -1.0 or sphere_size > -1.0:
-            # print(f"Sphere visible reward: 1.0")
-            self.reward += 1.0
-
-            # Target orientation: yaw towards sphere, pitch and roll always 0
-            # Calculate yaw angle to face the sphere from origin (0, 0)
-            target_yaw = np.arctan2(self.sphere_position[1], self.sphere_position[0])
-            
-            target_orientation = np.array([0.0, 0.0, target_yaw], dtype=np.float32)
-            current_orientation = sensors[1]  # Attitude [roll, pitch, yaw] in radians
-            
-            # Orientation error (sum of absolute deviations)
-            orientation_error = np.sum(np.abs(current_orientation - target_orientation))
-            orientation_reward = np.exp(-orientation_error* 2)
-            # print(f"Orientation reward: {orientation_reward:.3f}")
-            self.reward += orientation_reward
+        # Target orientation: yaw towards reference object, pitch and roll always 0
+        # Calculate yaw angle to face the reference object from origin (0, 0)
+        target_yaw = 0
+        
+        target_orientation = np.array([0.0, 0.0, target_yaw], dtype=np.float32)
+        current_orientation = sensors[1]  # Attitude [roll, pitch, yaw] in radians
+        
+        # Orientation error (sum of absolute deviations)
+        orientation_error = np.sum(np.abs(current_orientation - target_orientation))
+        orientation_reward = np.exp(-orientation_error* 2)
+        # print(f"Orientation reward: {orientation_reward:.3f}")
+        self.reward += orientation_reward
 
         # if len(self.action_history) >= 2:
         #     last_raw_action = self.action_history[-2]
@@ -634,12 +665,12 @@ class DroneEnv(gym.Env):
                 self.env.set_setpoint(0, action)
                 observation, reward, termination, truncation, info = self.step(action)
 
+                print(observation)
+                print(reward)
                 if termination:
                     print("Termination: ", info)
                     self.reset()
                     continue
-
-                rgba_frame = self.env.drones[0].rgbaImg
                 
                 # Print status every 10 iterations
                 if iteration % 1 == 0:
@@ -649,35 +680,6 @@ class DroneEnv(gym.Env):
                     print(f"  Sphere center [x,y]: [{observation[3]:.3f}, {observation[4]:.3f}]")
                     print("-" * 50)
                 
-
-                rgb_image = rgba_frame[:, :, :3].astype(np.uint8)
-                frame = cv2.cvtColor(rgba_frame.astype(np.uint8), cv2.COLOR_RGBA2BGR)
-                
-                red_mask = (
-                    (rgb_image[:, :, 0] > 100) &  # Red channel > 100
-                    (rgb_image[:, :, 1] == 0) &   # Green channel == 0
-                    (rgb_image[:, :, 2] == 0)     # Blue channel == 0
-                ).astype(np.uint8) * 255
-
-                red_at_edges = (
-                    np.any(red_mask[0, :] > 0) or      # Top edge
-                    np.any(red_mask[-1, :] > 0) or     # Bottom edge
-                    np.any(red_mask[:, 0] > 0) or      # Left edge
-                    np.any(red_mask[:, -1] > 0)        # Right edge
-                )
-
-                contours, _ = cv2.findContours(red_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                if contours and not red_at_edges:
-                    contour = max(contours, key=cv2.contourArea)
-                    epsilon = 0.02 * cv2.arcLength(contour, True)
-                    approx = cv2.approxPolyDP(contour, epsilon, True)
-
-                    if len(approx) == 4:
-                        corners = approx.reshape((4,2))
-                        for (x, y) in corners:
-                            cv2.circle(frame, (int(x), int(y)), 1, (0,255,0), -1)  # Green circles
-                        cv2.polylines(frame, [corners], isClosed=True, color=(0,255,0), thickness=1)
-                cv2.imshow("RadioMaster Pocket Control", frame)
                 
                 # Check for keyboard input
                 key = cv2.waitKey(1) & 0xFF
@@ -691,6 +693,7 @@ class DroneEnv(gym.Env):
                     print("-" * 50)
                     continue
 
+                # input()
                 iteration += 1
                 
         except RuntimeError as e:
