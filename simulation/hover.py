@@ -24,7 +24,8 @@ class QuadXHoverEnv(gym.Env):
         self._target_pos = np.array([0.0, 0.0, 1.0])
 
         self.action = np.zeros(4, dtype=np.float32)
-        
+        self.prev_action = np.zeros(4, dtype=np.float32)
+
         self.termination = False
         self.truncation = False
         self.max_steps = 400
@@ -160,6 +161,11 @@ class QuadXHoverEnv(gym.Env):
         angular_distance = np.linalg.norm(self.aviary.state(0)[1][:2])
 
         self.reward -= linear_distance + angular_distance
+
+        action_diff = self.action - self.prev_action
+        smoothness_penalty = np.linalg.norm(action_diff)
+        self.reward -= smoothness_penalty * 0.2
+
         self.reward += 1.0
 
     def step(self, action):
@@ -184,7 +190,7 @@ class QuadXHoverEnv(gym.Env):
             self.compute_term_trunc_reward()
 
         self.step_count += 1
-
+        self.prev_action = self.action.copy()
         return self.state, self.reward, self.termination, self.truncation, self.info
 
     def render(self):
