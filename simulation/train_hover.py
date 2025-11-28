@@ -1,5 +1,4 @@
-from hover import DroneEnv
-from yaw import DroneEnv as YawDroneEnv
+from hover import QuadXHoverEnv
 from stable_baselines3 import PPO, SAC
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.env_util import make_vec_env
@@ -35,7 +34,8 @@ class CheckpointCallback(BaseCallback):
         return True
 
 def make_env():
-    return DroneEnv(render=False)
+    # return DroneEnv(render=False)
+    return QuadXHoverEnv()
 
 if __name__ == "__main__":
     num_env = 16
@@ -54,7 +54,7 @@ if __name__ == "__main__":
         gradient_steps=1,         # How many gradient updates to perform after each train_freq
         batch_size=256,
         learning_rate=0.0003,
-        policy_kwargs=dict(net_arch=[512, 512])
+        policy_kwargs=dict(net_arch=[128, 128])
     )
 
     model.learn(total_timesteps=2_000_000, callback=checkpoint_callback)

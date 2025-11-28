@@ -1,15 +1,14 @@
 import os
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"  # Force CPU usage
 from stable_baselines3 import PPO, SAC
-from hover import DroneEnv
-from yaw import DroneEnv as YawDroneEnv
+from hover import QuadXHoverEnv
 from stable_baselines3.common.vec_env import VecNormalize, DummyVecEnv
 import time
-env = DummyVecEnv([lambda: DroneEnv(render=True)])
-vec_env = VecNormalize.load("./ppo_hover_checkpoint3/ppo_hover_2000000_steps_None_lenNone_rewNone.pkl", venv=env)
+env = DummyVecEnv([lambda: QuadXHoverEnv(render=True)])
+vec_env = VecNormalize.load("./ppo_hover_checkpoint3/ppo_hover_240000_steps_None_lenNone_rewNone.pkl", venv=env)
 vec_env.training = False
 vec_env.norm_reward = False
-model = SAC.load("./ppo_hover_checkpoint3/ppo_hover_2000000_steps_None_lenNone_rewNone.zip", env=vec_env)
+model = SAC.load("./ppo_hover_checkpoint3/ppo_hover_240000_steps_None_lenNone_rewNone.zip", env=vec_env)
 
 
 obs = vec_env.reset()

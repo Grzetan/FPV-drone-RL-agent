@@ -1,722 +1,190 @@
-import cv2
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
 from PyFlyt.core import Aviary
-import pygame
-from stable_baselines3.common.env_checker import check_env
-from collections import deque
-import random
+import pybullet as p
 
-class RadioMasterJoystick:
-    """
-    RadioMaster Pocket joystick controller for drone control.
-    Maps axis values from RadioMaster Pocket to drone controls.
-    """
-    
-    def __init__(self, joystick_index=0):
-        """
-        Initialize the RadioMaster joystick controller.
-        
-        Args:
-            joystick_index: Index of the joystick device (default: 0)
-        """
-        pygame.init()
-        
-        # Check for connected joysticks
-        joystick_count = pygame.joystick.get_count()
-        if joystick_count == 0:
-            raise RuntimeError("No joystick detected. Please connect your RadioMaster Pocket.")
-        
-        if joystick_index >= joystick_count:
-            raise RuntimeError(f"Joystick index {joystick_index} not available. Found {joystick_count} joystick(s).")
-        
-        # Initialize the joystick
-        self.joystick = pygame.joystick.Joystick(joystick_index)
-        self.joystick.init()
-        
-        print(f"Initialized RadioMaster Joystick: {self.joystick.get_name()}")
-        print(f"Number of Axes: {self.joystick.get_numaxes()}")
-        print(f"Number of Buttons: {self.joystick.get_numbuttons()}")
-        
-        # Control mappings
-        self.axis_mappings = {
-            'roll': 0,      # Axis 0: Roll (left/right)
-            'pitch': 1,     # Axis 1: Pitch (forward/backward)
-            'throttle': 2,  # Axis 2: Throttle (up/down)
-            'yaw': 3        # Axis 3: Yaw (rotation)
-        }
-        
-        # Control scaling factors
-        self.scale_factors = {
-            'roll': 1.0,    # Full range for roll
-            'pitch': 1.0,   # Full range for pitch
-            'throttle': 1.0, # Full range for throttle
-            'yaw': 1.0      # Full range for yaw
-        }
-        
-        # Dead zone to prevent small movements
-        self.dead_zone = 0.05
-        
-    def get_controls(self):
-        """
-        Get current control values from the RadioMaster Pocket.
-        
-        Returns:
-            dict: Dictionary with control values {'roll': float, 'pitch': float, 'throttle': float, 'yaw': float}
-        """
-        # Process pygame events
-        pygame.event.pump()
-        
-        controls = {}
-        
-        for control_name, axis_index in self.axis_mappings.items():
-            if axis_index < self.joystick.get_numaxes():
-                # Get raw axis value (-1 to 1)
-                raw_value = self.joystick.get_axis(axis_index)
-                
-                # Apply dead zone
-                if abs(raw_value) < self.dead_zone:
-                    raw_value = 0.0
-                
-                # Apply scaling
-                scaled_value = raw_value * self.scale_factors[control_name]
-                
-                # Clamp to [-1, 1] range
-                controls[control_name] = np.clip(scaled_value, -1.0, 1.0)
-            else:
-                controls[control_name] = 0.0
-        
-        return controls
-    
-    def get_action_array(self):
-        """
-        Get control values as numpy array for drone control.
-        
-        Returns:
-            np.array: Array with [roll, pitch, yaw, throttle] values in [-1, 1] range
-        """
-        controls = self.get_controls()
-        return np.array([
-            controls['roll'],
-            controls['pitch'], 
-            controls['yaw'],
-            controls['throttle']
-        ], dtype=np.float32)
-    
-    def set_scale_factor(self, control_name, scale):
-        """
-        Set scaling factor for a specific control.
-        
-        Args:
-            control_name: Name of the control ('roll', 'pitch', 'throttle', 'yaw')
-            scale: Scaling factor (float)
-        """
-        if control_name in self.scale_factors:
-            self.scale_factors[control_name] = scale
-        else:
-            raise ValueError(f"Invalid control name: {control_name}")
-    
-    def set_dead_zone(self, dead_zone):
-        """
-        Set dead zone for all controls.
-        
-        Args:
-            dead_zone: Dead zone value (0.0 to 1.0)
-        """
-        self.dead_zone = np.clip(dead_zone, 0.0, 1.0)
-    
-    def print_status(self):
-        """
-        Print current control values for debugging.
-        """
-        controls = self.get_controls()
-        print(f"Roll: {controls['roll']:6.3f} | Pitch: {controls['pitch']:6.3f} | "
-              f"Throttle: {controls['throttle']:6.3f} | Yaw: {controls['yaw']:6.3f}", end="\r")
-    
-    def cleanup(self):
-        """
-        Clean up pygame resources.
-        """
-        pygame.quit()
+class QuadXHoverEnv(gym.Env):
+    def __init__(
+        self,
+        flight_mode: int = 0,
+        agent_hz: int = 40,
+        render: bool = False,
+    ):
+        super().__init__()
 
+        self.flight_mode = flight_mode
+        self.agent_hz = agent_hz
+        self.render = render
 
-class DroneEnv(gym.Env):
-    def __init__(self, render=False, history_length=8):
-        super(DroneEnv, self).__init__()
+        self.env_step_ratio = int(120 / self.agent_hz)
+
+        self._target_pos = np.array([0.0, 0.0, 1.0])
+
+        self.action = np.zeros(4, dtype=np.float32)
         
-        # History configuration
-        self.history_length = history_length  # Number of timesteps to track for actions and sphere observations
+        self.termination = False
+        self.truncation = False
+        self.max_steps = 400
+        self.step_count = 0
+        self.flight_dome_size = 3.0
+        self.floor_threshold = 0.1  # Height threshold to consider "on the floor"
         
-        # [<-1, 1>: roll, <-1, 1>: pitch, <-1, 1>: yaw, <-1, 1>: throttle]
-        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(4,), dtype=np.float32)
-
-        # Observation space: [attitude_xyz (3), angular_velocity_xyz (3), linear_velocity_xyz (3), last_N_actions (N*4), last_N_global_positions (N*3)]
-        # Total: 3 + 3 + 3 + (N*4) + (N*3) where N = history_length
-        # Angular velocity is clipped to [-20, 20] rad/s and normalized to [-1, 1]
-        # Global positions: N entries of [x, y, z] each (last entry is most recent)
-        # Position values will be normalized based on flight_dome_size and max_height
-        action_history_size = self.history_length * 4
-        global_position_history_size = self.history_length * 3  # x, y, z for each timestep
-        total_size = 3 + 3 + 3 + action_history_size + global_position_history_size
+        self.info = {}
+        self.info["out_of_bounds"] = False
+        self.info["collision"] = False
+        self.info["env_complete"] = False
+        self.info["on_floor"] = False
         
-        # Define bounds (will normalize positions to roughly [-1, 1] range)
-        low_bounds = np.array(
-            [-1] * 3 +  # attitude
-            [-1] * 3 +  # angular_velocity
-            [-1] * 3 +  # linear_velocity
-            [-1] * action_history_size +  # actions history
-            [-1] * global_position_history_size,  # global position history (allow some overflow)
-            dtype=np.float32
-        )
-        high_bounds = np.array(
-            [1] * 3 +  # attitude
-            [1] * 3 +  # angular_velocity
-            [1] * 3 +  # linear_velocity
-            [1] * action_history_size +  # actions history
-            [1] * global_position_history_size,  # global position history (allow some overflow)
-            dtype=np.float32
-        )
-        self.observation_space = spaces.Box(
-            low=low_bounds, high=high_bounds, shape=(total_size,), dtype=np.float32
-        )
+        high = np.ones(4)
+        low = -np.ones(4)
+        self.action_space = spaces.Box(low=low, high=high, dtype=np.float64)
 
-        start_pos = np.array([[0.0, 0.0, 0.0]])
-        start_orn = np.array([[0.0, 0.0, 0.0]])
+        # Observation Space:
+        # Structure: [ang_vel (3), quaternion (4), lin_vel (3), lin_pos (3), action (4)]
+        # Total size: 3 + 4 + 3 + 3 + 4 = 17
+        obs_dim = 17
+        
+        high = np.inf * np.ones(obs_dim)
+        low = -np.inf * np.ones(obs_dim)
+        self.observation_space = spaces.Box(low=low, high=high, dtype=np.float64)
 
-        self.physics_hz = 240.0  # PyFlyt simulation runs at 240 Hz
-        self.env = Aviary(
-            start_pos=start_pos,
-            start_orn=start_orn,
-            render=render,
+    def reset(self, seed=None, options=None):
+        super().reset(seed=seed)
+        if hasattr(self, "aviary"):
+            self.aviary.disconnect()
+
+        self.aviary = Aviary(
+            start_pos=np.array([[0.0, 0.0, 0.0]]), # Starting position set to 0,0,0
+            start_orn=np.array([[0.0, 0.0, 0.0]]),
+            render=self.render,
             drone_type="quadx",
-            physics_hz=self.physics_hz,
             drone_options={
-                "use_camera": True,
+                # "use_camera": True,
                 "camera_angle_degrees": -25,
                 "camera_FOV_degrees": 90,
-                "camera_resolution": (128, 128),  # Width x Height in pixels (default is usually 128x128)
-                "model_dir": "./drone_models",  # Path to your drone models directory, there you can change the mass, thrust, model etc.
+                "camera_resolution": (128, 128),
+                "model_dir": "./drone_models",
                 "drone_model": "cf2x",
             },
         )
-
-        self.add_reference_object()
-        # self.add_reference_structures()
-
-        self.env.set_mode(0)
-
-        self.action = np.zeros(4, dtype=np.float32)
-
-        # Physics parameters
-        self.dt = 1.0 / self.physics_hz  # Time step between physics updates
-        
-        # Buffer to store last 5 attitude positions for angular velocity calculation
-        # Each entry is just the attitude array (roll, pitch, yaw)
-        self.attitude_history = deque(maxlen=5)
-        # Initialize with zeros
-        for _ in range(5):
-            self.attitude_history.append(np.zeros(3, dtype=np.float32))
-        
-        # Buffer to store last N actions
-        default_action = np.array([0.0, 0.0, 0.0, -1.0], dtype=np.float32)
-        self.action_history = deque(maxlen=self.history_length)
-        for _ in range(self.history_length):
-            self.action_history.append(default_action.copy())
-        
-        # Buffer to store last N global position observations (x, y, z)
-        default_global_position = np.array([0.0, 0.0, 0.0], dtype=np.float32)
-        self.global_position_history = deque(maxlen=self.history_length)
-        for _ in range(self.history_length):
-            self.global_position_history.append(default_global_position.copy())
-        
-        # Angular velocity clipping and normalization parameters per axis [roll, pitch, yaw]
-        self.max_angular_velocity = np.array([20.0, 20.0, 35.0], dtype=np.float32)  # rad/s
-
-        self.termination = False
-        self.truncation =False
-        self.max_steps = 2000
-        self.step_count = 0
-        self.flight_dome_size = 10.0
-        self.max_height = 10.0
-        
-        # Normalization parameters for global position
-        # Will normalize x, y to [-1, 1] based on flight_dome_size
-        # Will normalize z to [0, 1] based on max_height
-        self.position_normalization = np.array([self.flight_dome_size, self.flight_dome_size, self.max_height], dtype=np.float32)
-        
-        self.info = {}
-
-    def add_reference_object(self):
-        # Generate random position: 10m away from (0,0) in XY plane, random height 10-25m
-        random_angle = random.uniform(0, 2 * np.pi)
-        x = 6.0 * np.cos(random_angle)
-        y = 6.0 * np.sin(random_angle)
-        z = random.uniform(4, 12)
-        
-        # Store the position for reward calculation
-        self.reference_object_position = np.array([x, y, z], dtype=np.float32)
-        
-        # Create a green cube with one red face
-        cube_size = 2.0  # 2m cube
-        
-        # Create a thin red face (a flat box) on the front face
-        # The red face is placed on the +X face of the cube (forward direction)
-        red_face_visual_id = self.env.createVisualShape(
-            shapeType=self.env.GEOM_BOX,
-            halfExtents=[0.02, cube_size/2 + 0.01, cube_size/2 + 0.01],  # Thin red panel (thin in X)
-            rgbaColor=[1, 0, 0, 1],  # Red
-            visualFramePosition=[cube_size/2, 0, 0]  # Position it on the +X face of cube
-        )
-        
-        # Calculate yaw rotation to face origin (only Z-axis rotation)
-        # The red face is on the +X local face, so we need to rotate so that +X points toward origin
-        yaw_to_origin = np.arctan2(-y, -x)  # Angle from cube position to origin in XY plane
-        yaw_rotation = yaw_to_origin
-        
-        # Create orientation quaternion with only yaw rotation (roll=0, pitch=0)
-        # Quaternion for rotation around Z axis: [x, y, z, w] = [0, 0, sin(yaw/2), cos(yaw/2)]
-        quat_z = np.sin(yaw_rotation / 2)
-        quat_w = np.cos(yaw_rotation / 2)
-        orientation = [0, 0, quat_z, quat_w]
-        
-        # Create the red face as a separate body at the same position with same orientation
-        self.red_face_id = self.env.createMultiBody(
-            baseMass=0,
-            baseVisualShapeIndex=red_face_visual_id,
-            basePosition=[x, y, z],
-            baseOrientation=orientation
-        )
-
-    def calculate_drone_position(self, rgba_image):
-        # Default values when no rectangle is detected - all corners at -1.0
-        # Format: [c1_x, c1_y, c2_x, c2_y, c3_x, c3_y, c4_x, c4_y]
-        default_corners = np.array([-1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0], dtype=np.float32)
-        
-        # Get image dimensions (128x128 as configured)
-        img_height, img_width = rgba_image.shape[:2]
-        
-        red_mask = (
-            (rgba_image[:, :, 0] > 100) &  # Red channel > 100
-            (rgba_image[:, :, 1] == 0) &   # Green channel == 0
-            (rgba_image[:, :, 2] == 0)     # Blue channel == 0
-        ).astype(np.uint8) * 255
-
-        red_at_edges = (
-            np.any(red_mask[0, :] > 0) or      # Top edge
-            np.any(red_mask[-1, :] > 0) or     # Bottom edge
-            np.any(red_mask[:, 0] > 0) or      # Left edge
-            np.any(red_mask[:, -1] > 0)        # Right edge
-        )
-
-        # frame = cv2.cvtColor(rgba_image.astype(np.uint8), cv2.COLOR_RGBA2BGR)
-
-        contours, _ = cv2.findContours(red_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if contours and not red_at_edges:
-            contour = max(contours, key=cv2.contourArea)
-            epsilon = 0.04 * cv2.arcLength(contour, True)
-            approx = cv2.approxPolyDP(contour, epsilon, True)
-
-            # print("Approx length: ", len(approx))
-            if len(approx) == 4:
-                corners = approx.reshape((4, 2))
-                
-                # for (x, y) in corners:
-                #     cv2.circle(frame, (int(x), int(y)), 1, (0,255,0), -1)  # Green circles
-                #     cv2.polylines(frame, [corners], isClosed=True, color=(0,255,0), thickness=1)
-
-                # Normalize all 4 corners to [-1, 1] range
-                normalized_corners = np.zeros(8, dtype=np.float32)
-                for i in range(4):
-                    # X: left edge (0) -> -1, right edge (img_width) -> 1
-                    normalized_corners[i*2] = (corners[i, 0] / (img_width / 2.0)) - 1.0
-                    # Y: top edge (0) -> -1, bottom edge (img_height) -> 1
-                    normalized_corners[i*2 + 1] = (corners[i, 1] / (img_height / 2.0)) - 1.0
-                
-                # cv2.imshow("Rectangle Corners", frame)
-                return normalized_corners
-
-        # print("No rectangle found")
-        # cv2.imshow("Rectangle Corners", frame)
-        return default_corners
-
-    def add_reference_structures(self):
-        """
-        Add various reference structures to help with spatial awareness during flight.
-        """
-        
-        # Building-like structures
-        self.add_buildings()
-        
-        # Colored reference objects
-        self.add_reference_objects()
-
-    def add_buildings(self):
-        """Add building-like structures for reference."""
-        buildings = [
-            # Building 1: Low building
-            {"pos": [8, 8, 0], "size": [2, 2, 2], "color": [0.7, 0.4, 0.4, 1.0]},
-            # Building 2: Medium building
-            {"pos": [-8, 8, 0], "size": [1.5, 1.5, 4], "color": [0.4, 0.7, 0.4, 1.0]},
-            # Building 3: Tall building
-            {"pos": [8, -8, 0], "size": [1, 1, 6], "color": [0.4, 0.4, 0.7, 1.0]},
-            # Building 4: Wide building
-            {"pos": [-8, -8, 0], "size": [3, 1, 2.5], "color": [0.7, 0.7, 0.4, 1.0]},
-        ]
-        
-        for building in buildings:
-            pos = building["pos"]
-            size = building["size"]
-            color = building["color"]
-            
-            # Create building box
-            building_shape_id = self.env.createVisualShape(
-                shapeType=self.env.GEOM_BOX,
-                halfExtents=[size[0]/2, size[1]/2, size[2]/2],
-                rgbaColor=color
-            )
-            self.env.createMultiBody(
-                baseMass=0,
-                baseVisualShapeIndex=building_shape_id,
-                basePosition=[pos[0], pos[1], size[2]/2]
-            )
-
-    def add_reference_objects(self):
-        """Add colored reference objects at different locations."""
-        objects = [
-            # Red cube
-            {"pos": [3, 0, 1], "shape": "box", "size": [0.5, 0.5, 0.5], "color": [1.0, 0.0, 0.0, 1.0]},
-            # Green sphere
-            {"pos": [-3, 0, 1], "shape": "sphere", "size": [0.3], "color": [0.0, 1.0, 0.0, 1.0]},
-            # Blue cylinder
-            {"pos": [0, 3, 1], "shape": "cylinder", "size": [0.2, 0.8], "color": [0.0, 0.0, 1.0, 1.0]},
-            # Yellow pyramid (box approximation)
-            {"pos": [0, -3, 1], "shape": "box", "size": [0.4, 0.4, 0.8], "color": [1.0, 1.0, 0.0, 1.0]},
-        ]
-        
-        for obj in objects:
-            pos = obj["pos"]
-            color = obj["color"]
-            
-            if obj["shape"] == "box":
-                size = obj["size"]
-                shape_id = self.env.createVisualShape(
-                    shapeType=self.env.GEOM_BOX,
-                    halfExtents=[size[0]/2, size[1]/2, size[2]/2],
-                    rgbaColor=color
-                )
-            elif obj["shape"] == "sphere":
-                radius = obj["size"][0]
-                shape_id = self.env.createVisualShape(
-                    shapeType=self.env.GEOM_SPHERE,
-                    radius=radius,
-                    rgbaColor=color
-                )
-            elif obj["shape"] == "cylinder":
-                radius, height = obj["size"]
-                shape_id = self.env.createVisualShape(
-                    shapeType=self.env.GEOM_CYLINDER,
-                    radius=radius,
-                    length=height,
-                    rgbaColor=color
-                )
-            
-            self.env.createMultiBody(
-                baseMass=0,
-                baseVisualShapeIndex=shape_id,
-                basePosition=pos
-            )
-
-    def calculate_angular_velocity(self):
-        if len(self.attitude_history) < 5:
-            return np.zeros(3, dtype=np.float32)
-        
-        # Extract attitudes (no timestamps needed - we use fixed dt)
-        attitudes = np.array(list(self.attitude_history), dtype=np.float32)
-        
-        # Create time array with fixed dt: [0, dt, 2*dt, 3*dt, 4*dt]
-        # This represents time steps with indices 0-4
-        timestamps = np.arange(5, dtype=np.float64) * self.dt
-        
-        # Normalize timestamps to improve numerical stability (center around 0)
-        t_mean = np.mean(timestamps)
-        t_normalized = timestamps - t_mean
-        
-        # Calculate angular velocity for each axis using least squares
-        # We're fitting: attitude[i] = velocity * t + offset
-        # For simple linear regression: velocity = cov(t, attitude) / var(t)
-        angular_velocity = np.zeros(3, dtype=np.float32)
-        
-        for axis in range(3):
-            attitude_axis = attitudes[:, axis]
-            
-            # Simple least squares solution for slope
-            # slope = sum((t - t_mean) * (att - att_mean)) / sum((t - t_mean)^2)
-            att_mean = np.mean(attitude_axis)
-            numerator = np.sum(t_normalized * (attitude_axis - att_mean))
-            denominator = np.sum(t_normalized ** 2)
-            
-            if abs(denominator) > 1e-10:
-                angular_velocity[axis] = numerator / denominator
-            else:
-                angular_velocity[axis] = 0.0
-            
-        angular_velocity_clipped = np.clip(
-            angular_velocity, 
-            -self.max_angular_velocity, 
-            self.max_angular_velocity
-        )
-        
-        # Normalize to [-1, 1] range per axis by dividing by max for each axis
-        angular_velocity_normalized = angular_velocity_clipped / self.max_angular_velocity        
-        return angular_velocity_normalized.astype(np.float32)
-    
-    def create_observation(self, sensors):
-        attitude_data = sensors[1] / np.pi
-
-        # Get current global position and normalize it
-        current_position = sensors[3]  # Global position [x, y, z]
-        normalized_position = current_position / self.position_normalization
-        
-        # Update global position history with current observation (last element is most recent)
-        self.global_position_history.append(normalized_position.copy())
-
-        # Calculate angular velocity from attitude history
-        angular_velocity = self.calculate_angular_velocity()
-        
-        # Get linear velocity
-        linear_velocity = sensors[2]
-        # Normalize linear velocity (assuming max speed ~20 m/s for normalization)
-        normalized_linear_velocity = np.clip(linear_velocity / 20.0, -1.0, 1.0)
-
-        # Flatten last N actions into a single array
-        last_N_actions = np.concatenate(list(self.action_history), dtype=np.float32)
-        
-        # Flatten last N global position observations into a single array (last entry is most recent)
-        last_N_global_positions = np.concatenate(list(self.global_position_history), dtype=np.float32)
-
-        # print("angular_velocity", np.round(angular_velocity, 3))
-        return np.concatenate(
-            (attitude_data, angular_velocity, normalized_linear_velocity, last_N_actions, last_N_global_positions),
-            dtype=np.float32,
-        )
-
-    def reset(self, seed=None, options=None):
-        self.env.reset()
-        self.env.start_orn = np.array([[0.0, 0.0, 0.0]])
-
-        self.add_reference_object()
-        # self.add_reference_structures()
-        sensors = self.env.state(0)
-        self.action = np.array([0.0, 0.0, 0.0, -1.0], dtype=np.float32)
-        
-        # Reset attitude history buffer
-        self.attitude_history.clear()
-        for _ in range(5):
-            self.attitude_history.append(np.zeros(3, dtype=np.float32))
-        
-        # Reset action history buffer
-        default_action = np.array([0.0, 0.0, 0.0, -1.0], dtype=np.float32)
-        self.action_history.clear()
-        for _ in range(self.history_length):
-            self.action_history.append(default_action.copy())
-        
-        # Reset global position history buffer
-        default_global_position = np.array([0.0, 0.0, 0.0], dtype=np.float32)
-        self.global_position_history.clear()
-        for _ in range(self.history_length):
-            self.global_position_history.append(default_global_position.copy())
-        
+        self.aviary.set_mode(0)
+        self.aviary.reset()
         self.step_count = 0
         self.termination = False
         self.truncation = False
-        self.info = {}
-
-        obs = self.create_observation(sensors)
-        return obs, {}
-
-    def calculate_reward(self, obs, sensors):
-        self.reward = 0.0
-
-        # Large penalty for termination due to failure conditions
-        if self.termination:
-            if self.info.get("out_of_bounds", False):
-                self.reward -= 100.0
-            if self.info.get("excessive_tilt", False):
-                self.reward -= 100.0
-            return self.reward
-
-        # Survival reward - encourages staying operational
-        self.reward += 0.3
+        self.action = np.zeros(4, dtype=np.float32)
+        self.info = {"out_of_bounds": False, "collision": False, "env_complete": False, "on_floor": False}
         
-        # Get current position
-        current_position = sensors[3]  # Global position [x, y, z]
-        
-        # Penalty for being on the ground (Z position at or near 0)
-        if current_position[2] <= 0.1:  # Z position is at ground level
-            self.reward -= 2.0
-        
-        # Target position: (0, 0, sphere_z - 10) - 10m below the sphere
-        target_position = np.array([0.0, 0.0, 5.0], dtype=np.float32)
-        
-        # Position error (Euclidean distance from target)
-        position_error = np.linalg.norm(current_position - target_position)
-        # Reward decreases with distance, maximum reward when at target
-        position_reward = np.exp(-position_error / 4.0)
-        # print(f"Position reward: {position_reward:.3f}")
-        self.reward += position_reward
-        
-        # Target orientation: yaw towards reference object, pitch and roll always 0
-        # Calculate yaw angle to face the reference object from origin (0, 0)
-        target_yaw = 0
-        
-        target_orientation = np.array([0.0, 0.0, target_yaw], dtype=np.float32)
-        current_orientation = sensors[1]  # Attitude [roll, pitch, yaw] in radians
-        
-        # Orientation error (sum of absolute deviations)
-        orientation_error = np.sum(np.abs(current_orientation - target_orientation))
-        orientation_reward = np.exp(-orientation_error* 2)
-        # print(f"Orientation reward: {orientation_reward:.3f}")
-        self.reward += orientation_reward
+        for _ in range(10):
+            self.aviary.step()
 
-        # if len(self.action_history) >= 2:
-        #     last_raw_action = self.action_history[-2]
-        #     current_raw_action = self.action_history[-1]
-        #     action_diff = current_raw_action - last_raw_action
-        #     self.reward -= np.sum(np.square(action_diff)) * 0.05
+        self.compute_state()
+        return self.state, self.info
 
-        # print(f"Reward: {self.reward:.3f} | Pos Error: {position_error:.3f} | Orient Error: {orientation_error:.3f}")
-        return self.reward
+    def compute_attitude(self):
+        """
+        This returns the base attitude for the drone.
+        - ang_vel (vector of 3 values)
+        - ang_pos (vector of 3 values)
+        - lin_vel (vector of 3 values)
+        - lin_pos (vector of 3 values)
+        - quaternion (vector of 4 values)
+        """
+        raw_state = self.aviary.state(0)
+
+        # state breakdown
+        ang_vel = raw_state[0]
+        ang_pos = raw_state[1]
+        lin_vel = raw_state[2]
+        lin_pos = raw_state[3]
+
+        # quaternion angles
+        quaternion = p.getQuaternionFromEuler(ang_pos)
+
+        return ang_vel, ang_pos, lin_vel, lin_pos, quaternion
+
+    def compute_state(self):
+        """Computes the state of the current timestep."""
+        ang_vel, ang_pos, lin_vel, lin_pos, quaternion = self.compute_attitude()
         
+        # Combined state without auxiliary info
+        # [ang_vel, quaternion, lin_vel, lin_pos, action]
+        self.state = np.concatenate(
+            [
+                ang_vel, 
+                quaternion, 
+                lin_vel, 
+                lin_pos, 
+                self.action
+            ], 
+            axis=-1
+        )
 
-    def step(self, action):
-        # Store the raw action in history before scaling
-        raw_action = action.copy()
+    def compute_term_trunc_reward(self):
+        """Computes the termination, truncation, and reward of the current timestep."""
         
-        action[0] *= 30.0 
-        action[1] *= 30.0
-        action[2] *= -30.0
-        action[3] = (action[3] + 1) / 2  # Throttle: keep normalized 0-1
-
-        self.action = action.copy()
-
-        self.env.set_setpoint(0, action)
-
-        for _ in range(1):
-            self.env.step()
-
-        sensors = self.env.state(0)
-        
-        # Update attitude history with current attitude (no timestamp needed - fixed dt)
-        attitude_data = sensors[1]
-        self.attitude_history.append(attitude_data.copy())
-        
-        # Update action history with raw action (before scaling)
-        self.action_history.append(raw_action)
-
-        # reset info dict for this step
-        self.info = {}
-
-        if self.step_count >= self.max_steps:
+        # --- Base Termination/Truncation Logic ---
+        # Exceed step count
+        if self.step_count > self.max_steps:
             self.truncation = True
 
-        if abs(sensors[3][0]) > self.flight_dome_size or abs(sensors[3][1]) > self.flight_dome_size or sensors[3][2] > self.max_height:
+        # Exceed flight dome
+        if np.linalg.norm(self.aviary.state(0)[-1]) > self.flight_dome_size:
+            self.reward = -100.0
             self.info["out_of_bounds"] = True
             self.termination = True
+        
+        # Check if drone touches the floor after step 30
+        if self.step_count > 30:
+            lin_pos = self.aviary.state(0)[-1]
+            z_position = lin_pos[2]
+            
+            if z_position < self.floor_threshold:
+                self.reward = -100.0
+                self.info["on_floor"] = True
+                self.termination = True
 
-        # Terminate if roll or pitch exceeds 90 degrees (π/2 radians)
-        roll = attitude_data[0]
-        pitch = attitude_data[1]
-        if abs(roll) > np.pi / 3 or abs(pitch) > np.pi / 3:
-            self.info["excessive_tilt"] = True
-            self.termination = True
+        linear_distance = np.linalg.norm(
+            self.aviary.state(0)[-1] - self._target_pos
+        )
+        
+        # Negative Reward For High Yaw rate
+        yaw_rate = abs(self.aviary.state(0)[0][2])
+        yaw_rate_penalty = 0.01 * yaw_rate**2
+        self.reward -= yaw_rate_penalty
+
+        # Orientation penalty (roll/pitch)
+        angular_distance = np.linalg.norm(self.aviary.state(0)[1][:2])
+
+        self.reward -= linear_distance + angular_distance
+        self.reward += 1.0
+
+    def step(self, action):
+        """Steps the environment."""
+        self.action = action.copy()
+
+        self.reward = -0.1
+        self.aviary.set_setpoint(0, action)
+
+        for _ in range(self.env_step_ratio):
+            if self.termination or self.truncation:
+                break
+
+            self.aviary.step()
+
+            self.compute_state()
+            self.compute_term_trunc_reward()
 
         self.step_count += 1
-        obs = self.create_observation(sensors)
-        reward = self.calculate_reward(obs, sensors)
 
-        return obs, reward, self.termination, self.truncation, self.info
+        return self.state, self.reward, self.termination, self.truncation, self.info
 
-    def test_env_with_joystick(self, joystick_index=0):
-        """
-        Test the environment using RadioMaster Pocket joystick control.
-        
-        Args:
-            joystick_index: Index of the joystick device (default: 0)
-        """
-        try:
-            # Initialize RadioMaster joystick
-            joystick = RadioMasterJoystick(joystick_index)
-            
-            print("RadioMaster Pocket Joystick Controls:")
-            print("  Axis 0: Roll (left/right)")
-            print("  Axis 1: Pitch (forward/backward)")
-            print("  Axis 2: Throttle (up/down)")
-            print("  Axis 3: Yaw (rotation)")
-            print("  Press 'R' to reset environment")
-            print("  Press 'q' or ESC to quit")
-            print("-" * 50)
-            
-            iteration = 0
-            while True:
-                # Get joystick controls
-                action = joystick.get_action_array()
-                # Apply action to drone
-                self.env.set_setpoint(0, action)
-                observation, reward, termination, truncation, info = self.step(action)
+    def render(self):
+        """Renders the environment."""
+        return self.aviary.render()
 
-                print(observation)
-                print(reward)
-                if termination:
-                    print("Termination: ", info)
-                    self.reset()
-                    continue
-                
-                # Print status every 10 iterations
-                if iteration % 1 == 0:
-                    print(f"Iteration {iteration}")
-                    print(f"  Reward: {reward:.3f}")
-                    print(f"  Attitude [x,y,z]: [{observation[0]:.3f}, {observation[1]:.3f}, {observation[2]:.3f}]")
-                    print(f"  Sphere center [x,y]: [{observation[3]:.3f}, {observation[4]:.3f}]")
-                    print("-" * 50)
-                
-                
-                # Check for keyboard input
-                key = cv2.waitKey(1) & 0xFF
-                if key == ord('q') or key == 27:  # 'q' or ESC
-                    break
-                elif key == ord('r') or key == ord('R'):  # 'r' or 'R' to reset
-                    print("\nResetting environment...")
-                    observation, _ = self.reset()
-                    iteration = 0
-                    print("Environment reset complete!")
-                    print("-" * 50)
-                    continue
-
-                # input()
-                iteration += 1
-                
-        except RuntimeError as e:
-            print(f"Joystick Error: {e}")
-            print("Falling back to keyboard controls...")
-        except KeyboardInterrupt:
-            print("\nStopping joystick control...")
-        finally:
-            try:
-                joystick.cleanup()
-            except:
-                pass
-            cv2.destroyAllWindows()
-
-
-if __name__ == "__main__":
-    # Just display the environment without training
-    env = DroneEnv(render=True)  # Enable rendering
-    check_env(env)
-    obs, _ = env.reset()
-
-    print("Environment loaded. Starting RadioMaster Pocket control...")
-    print("Press Ctrl+C to exit.")
-
-    # Try joystick control first, fall back to keyboard if not available
-    env.test_env_with_joystick()
+    def close(self):
+        """Cleans up the environment."""
+        if hasattr(self, "aviary"):
+            self.aviary.disconnect()
