@@ -3,6 +3,8 @@ import gymnasium as gym
 from gymnasium import spaces
 from PyFlyt.core import Aviary
 import pybullet as p
+from radio_controller import RadioMasterJoystick
+import cv2
 
 class QuadXHoverEnv(gym.Env):
     def __init__(
@@ -60,7 +62,7 @@ class QuadXHoverEnv(gym.Env):
             render=self.render,
             drone_type="quadx",
             drone_options={
-                # "use_camera": True,
+                "use_camera": self.render,
                 "camera_angle_degrees": -25,
                 "camera_FOV_degrees": 90,
                 "camera_resolution": (128, 128),
@@ -136,7 +138,7 @@ class QuadXHoverEnv(gym.Env):
             self.termination = True
         
         # Check if drone touches the floor after step 30
-        if self.step_count > 30:
+        if self.step_count > 30 and not self.render:
             lin_pos = self.aviary.state(0)[-1]
             z_position = lin_pos[2]
             
@@ -164,6 +166,11 @@ class QuadXHoverEnv(gym.Env):
         """Steps the environment."""
         self.action = action.copy()
 
+        action[0] *= 30.0 
+        action[1] *= 30.0
+        action[2] *= -30.0
+        action[3] = (action[3] + 1) / 2  # Throttle: keep normalized 0-1
+
         self.reward = -0.1
         self.aviary.set_setpoint(0, action)
 
@@ -188,3 +195,82 @@ class QuadXHoverEnv(gym.Env):
         """Cleans up the environment."""
         if hasattr(self, "aviary"):
             self.aviary.disconnect()
+
+    def test_env_with_joystick(self, joystick_index=0):
+        """Test the environment with a RadioMaster joystick controller."""
+        joystick = None
+        try:
+            # Initialize RadioMaster joystick
+            joystick = RadioMasterJoystick(joystick_index)
+            
+            # Reset environment to initialize
+            observation, _ = self.reset()
+            
+            print("RadioMaster Pocket Joystick Controls:")
+            print("  Axis 0: Roll (left/right)")
+            print("  Axis 1: Pitch (forward/backward)")
+            print("  Axis 2: Throttle (up/down)")
+            print("  Axis 3: Yaw (rotation)")
+            print("  Press 'R' to reset environment")
+            print("  Press 'q' or ESC to quit")
+            print("-" * 50)
+            
+            iteration = 0
+            while True:
+                # Get joystick controls
+                action = joystick.get_action_array()
+                # Step the environment (set_setpoint is called inside step())
+                observation, reward, termination, truncation, info = self.step(action)
+
+                if termination or truncation:
+                    print(f"\nTermination: {info}")
+                    print("Resetting environment...")
+                    observation, _ = self.reset()
+                    iteration = 0
+                    continue
+                
+                # Print status every iteration
+                if iteration % 10 == 0:
+                    # Observation structure: [ang_vel (3), quaternion (4), lin_vel (3), lin_pos (3), action (4)]
+                    ang_vel = observation[0:3]
+                    lin_pos = observation[10:13]  # lin_pos starts at index 10 (3+4+3)
+                    lin_vel = observation[7:10]   # lin_vel starts at index 7 (3+4)
+                    
+                    print(f"Iteration {iteration}")
+                    print(f"  Reward: {reward:.3f}")
+                    print(f"  Position [x,y,z]: [{lin_pos[0]:.3f}, {lin_pos[1]:.3f}, {lin_pos[2]:.3f}]")
+                    print(f"  Velocity [x,y,z]: [{lin_vel[0]:.3f}, {lin_vel[1]:.3f}, {lin_vel[2]:.3f}]")
+                    print(f"  Angular velocity [x,y,z]: [{ang_vel[0]:.3f}, {ang_vel[1]:.3f}, {ang_vel[2]:.3f}]")
+                    print(f"  Step count: {self.step_count}")
+                    print("-" * 50)
+                
+                # Check for keyboard input (non-blocking)
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q') or key == 27:  # 'q' or ESC
+                    break
+                elif key == ord('r') or key == ord('R'):  # 'r' or 'R' to reset
+                    print("\nResetting environment...")
+                    observation, _ = self.reset()
+                    iteration = 0
+                    print("Environment reset complete!")
+                    print("-" * 50)
+                    continue
+
+                iteration += 1
+                
+        except RuntimeError as e:
+            print(f"Joystick Error: {e}")
+            print("Falling back to keyboard controls...")
+        except KeyboardInterrupt:
+            print("\nStopping joystick control...")
+        finally:
+            if joystick is not None:
+                try:
+                    joystick.cleanup()
+                except:
+                    pass
+            cv2.destroyAllWindows()
+
+if __name__ == "__main__":
+    env = QuadXHoverEnv(render=True)
+    env.test_env_with_joystick()
