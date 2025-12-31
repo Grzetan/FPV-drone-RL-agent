@@ -1,0 +1,14 @@
+[serial]
+port = "/dev/ttyUSB0"
+baud_rate = 400000
+
+[camera]
+id = 0
+preview = true
+
+[model]
+path = "path/to/your/model.pth"
+use_mock = true
+
+[logging]
+file = "controller.log"
